@@ -1,4 +1,4 @@
-﻿"""N13 하교 버스 — 지금 어떻게 움직일까? (Streamlit)
+"""N13 하교 버스 — 지금 어떻게 움직일까? (Streamlit)
 
 실행(로컬): 프로젝트 폴더에서  python -m streamlit run web/app.py
 비밀 값(화면·로그에 출력하지 않음)
@@ -6,13 +6,15 @@
   FEEDBACK_ENDPOINT : 피드백 저장용 Apps Script 웹 앱 주소. Secrets 또는 환경변수에서만 읽음(코드에 쓰지 않음)
 예측 방법 (analysis/REPORT.md)
   버스 1대 예상 인원 = 그 시간대 1분당 탑승률(부분 풀링, 9~10월 교통카드) × 같은 노선 앞차 간격(실시간, 없으면 시간표)
-  시간대·몰림 주의는 '버스가 N13에 도착하는 시각' 기준. 다른 노선 직전 도착(환승 비율)은 웹에서 쓰지 않음
-  탑승 가능성 = N13 출발 인원(도착 + N13 대기 − N13 하차)을 28/40/55명 기준에 넣은 4단계
-  못 탈 확률 범위 = 화면 표시용으로 정한 구간 (REPORT '웹에서의 계산 결정')
-지원 시간: 분석 자료가 평일 09~21시(21시대 포함)라서 그 밖에는 예측 없이 실시간 도착만 보여줌
-예정/실시간: 시간표 출발 + 출발점→N13 이동 시간으로 '예정'을 만들고, 실시간에 잡히면 '실시간'으로 바꿈(같은 버스 중복 표시 없음)
-API 호출 줄이기: 같은 정류장 도착정보는 45초 동안 저장해 재사용(실패도 45초 저장), N13은 백그라운드에서 60초마다 1번만 조회
-예시 모드: 주소 뒤에 ?demo=16:40&day=월  → 시간표로 만든 가상 도착(발표·캡처용, '예시' 표시)
+  혼잡도(4단계) = 버스 안 인원을 28/40/55명 기준에 넣은 단계. 탑승 가능성 = N13 출발 인원(도착 + N13 대기 − 하차) 기준
+  대체 정류장(정문·수통골삼거리·덕명중·수통골입구) 인원 = N13 도착 예상 인원 × 그 정류장 비율(alt_stop_load.py, 9~10월 교통카드)
+지원 시간: 요일과 상관없이 09:00~21:59. 그 밖에는 예측 없이 실시간 도착만. 주말은 금요일 예측표로 추정
+대체경로 추천: 걷는 시간 + 여유 1.5분보다 늦게 오는 첫 버스(실시간, 없으면 시간표)만 탈 수 있다고 보고,
+  실제로 타는 시각이 빠른 순 → 같으면 덜 붐비는 순으로 정렬. 상위 3개만 보이고 나머지는 '다른 방법 더 보기'
+자동 갱신: 버스·대체경로 부분만 45초마다 다시 그림(st.fragment). API는 서버 저장값을 쓰므로 갱신해도 호출이 늘지 않음
+API 호출 줄이기: 같은 정류장 도착정보는 60초 저장(실패도 저장), N13은 백그라운드에서 60초마다 1번만 조회
+공주 버스(300·340): 공주시 API로 덕명네거리 정류장을 찾지 못해 실시간 조회 안 함(안내 문구만)
+예시 모드: 주소 뒤에 ?demo=16:40&day=월(&routes=102)  → 시간표로 만든 가상 도착(발표·캡처용, '예시' 표시, 피드백 저장 안 함)
 """
 import datetime as dt
 import json
@@ -33,27 +35,35 @@ KST = dt.timezone(dt.timedelta(hours=9))
 DAYS = "월화수목금토일"
 SERVICE_HOURS = range(9, 22)                   # 09:00~21:59 (prediction_table 시간대 9~21)
 TH = (28, 40, 55)
-CONG = {1: "앉을 수 있음", 2: "서서 감", 3: "혼잡", 4: "매우 혼잡(만차)"}
+CONG = {1: "앉을 수 있음", 2: "서서 감", 3: "혼잡", 4: "매우 혼잡"}
 BOARD = {1: "높음", 2: "다소 높음", 3: "다소 낮음", 4: "낮음"}
 BOARD_TEXT = {"높음": "여유 있게 탈 수 있어요", "다소 높음": "서서 갈 수 있어요",
               "다소 낮음": "혼잡해요. 못 탈 수도 있어요", "낮음": "매우 혼잡해요. 못 탈 가능성이 높아요"}
+LEADB = {"높음": "여유 있게 탈 수 있어요", "다소 높음": "서서 갈 수 있어요", "다소 낮음": "혼잡해요", "낮음": "매우 혼잡해요"}
+WARN = {2: "서서 가야 할", 3: "혼잡할", 4: "매우 혼잡할"}
 PROB = {"높음": "10% 미만", "다소 높음": "10~20%", "다소 낮음": "20~40%", "낮음": "40% 이상"}  # 화면 표시용 구간(추정)
-STAGE_COLOR = {"높음": "#2f6db5", "다소 높음": "#5b8a3a", "다소 낮음": "#d4602a", "낮음": "#8f2410"}
+# 혼잡도 색: 버스 번호 색(파랑·녹색)과 겹치지 않는 노랑 → 주황 → 빨강. 글자색은 대비 4.5:1 이상(docs/ui_check.md)
+CHIP = {1: ("#fef3c7", "#78350f"), 2: ("#fed7aa", "#7c2d12"), 3: ("#fecaca", "#7f1d1d"), 4: ("#991b1b", "#ffffff")}
+BAR = {1: "#eab308", 2: "#f97316", 3: "#dc2626", 4: "#7f1d1d"}
 
-# 노선 색 (docs/route_colors.md)
-#  색 규칙: 대전시 보도자료(2008-12-29 '12월 30일부터 시내버스 노선이 확 바뀐다') "급행 빨강, 간선 파랑, 지선과 외곽 녹색"
-#  11번  = 외곽: 공식 시간표(2026.11.1) 구분 '외곽', 노선정보 API ROUTE_TP 4 → 녹색
-#  117·212번 = 녹색: 사용자 관찰(실제 차량). 공식 자료로 간선/지선 구분은 확인 안 됨(시간표 '도시'/빈칸, API ROUTE_TP 2는 간선·지선 묶음)
-#  102·104·107·113·48번 = 공식 자료로 확인 안 됨 → 회색(중립)
-GREEN, UNKNOWN = "#2e8b3e", "#6b7280"
-ROUTE_COLOR = {11: GREEN, 117: GREEN, 212: GREEN}
+# 노선 색 (docs/route_colors.md) — 사용자 확인(매일 타는 사용자가 직접 본 차량 색, 11/21)
+BLUE, GREEN, GRAY = "#1d5fd1", "#1a7f3a", "#4b5563"   # 흰 글자 대비 5.8 / 5.1 (docs/ui_check.md)
+ROUTE_COLOR = {102: BLUE, 104: BLUE, 107: BLUE, 113: BLUE, 48: BLUE, 11: GREEN, 117: GREEN, 212: GREEN}
 
-N13, GATE, SUTONG, DEOKMYEONG = "41730", "41690", "41670", "41400"
-HY_ROUTES = [11, 102, 104, 113, 212]          # 현충원역 방면
+N13 = "41730"
 ALL_ROUTES = [11, 102, 104, 113, 117, 212]
-WALK = {"정문": 6.8, "수통골삼거리": 11.1, "덕명네거리": 11.5}  # data/walk_times.csv, analysis/alt_nearby_stops.csv (추정)
-CACHE_SEC = 45
-FB_STOPS = {"N13"}
+SUBWAY_ROUTES = ALL_ROUTES   # 노선정보 API 경유 정류장: 6개 모두 N13 다음에 지하철역 근처를 지남(analysis/subway_routes_check.csv)
+MODES = ["지하철 환승", "특정 노선 (여러 개 선택)"]
+BUFFER = 1.5                 # 걷는 시간에 더하는 여유(분)
+# 대체 정류장: (이름, ARS, 걷는 분(추정), 노선, N13보다 먼저 오는 분(추정), 설명)
+#   걷는 시간: data/walk_times.csv(정문 6.8분), analysis/alt_nearby_stops.csv(수통골삼거리 11.1, 수통골입구 10.7, 덕명네거리 11.5분)
+#   먼저 오는 분: 정문 1분(실측 정문→N13 대부분 1분), 수통골삼거리·수통골입구 2정거장 앞 2분(추정)
+PLACES = [("정문", "41690", 6.8, ALL_ROUTES, 1, "N13보다 덜 찬 상태로 와요. 정문에서 타는 사람이 많아요"),
+          ("수통골삼거리", "41670", 11.1, [11, 102, 104], 2, "정문 전 정류장이라 덜 찬 상태로 와요"),
+          ("덕명중·수통골입구", "45770", 10.7, [113, 117, 212], 2, "정문 전 정류장이라 덜 찬 상태로 와요 (덕명중학교·수통골입구는 거의 같은 곳)"),
+          ("덕명네거리", "41400", 11.5, [48, 107, 300, 340], None, "현충원역 방면 · 대전 48·107번, 공주 300·340번")]
+CACHE_SEC = 45            # 화면 자동 갱신 간격
+API_TTL = 60              # 도착정보 저장 시간: 정류장 5곳 × 하루 1,440번 = 최대 7,200건(한도 10,000)
 
 
 # ---------------- 데이터 ----------------
@@ -63,7 +73,21 @@ def load_tables():
     S = pd.read_csv(HERE / "data" / "schedule_n13_days.csv")
     tp = HERE / "data" / "tashu_near.csv"
     T = pd.read_csv(tp) if tp.exists() else pd.DataFrame()
-    return P, S, T
+    R = pd.read_csv(HERE / "data" / "alt_stop_ratio.csv")
+    ratio = {}
+    for rt, g in R.groupby("노선"):
+        med = g["비율"].median()
+        for _, x in g.iterrows():
+            v = x["비율"] if x["비율"] == x["비율"] else med
+            ratio[(int(rt), int(x["시간대"]))] = min(float(v), 1.0)   # 1 넘는 칸(시간대 경계 효과)은 1로
+    return P, S, T, ratio
+
+
+@st.cache_data
+def load_alt():
+    """덕명네거리 107번 시간표 예정 (parse_timetable_alt.py: 회차지 동학사 출발 + 27분, 추정). 48번은 대전 시간표에 없음"""
+    p = HERE / "data" / "schedule_alt.csv"
+    return pd.read_csv(p) if p.exists() else pd.DataFrame(columns=["일정", "노선", "정류장", "예정분", "예정시각"])
 
 
 def _secret(name):
@@ -86,7 +110,7 @@ def service_key():
 
 
 def safe_msg(e):
-    """예외를 화면에 보일 때: 종류 이름만, 혹시 키·주소가 섞이면 가림"""
+    """예외를 남길 때: 종류 이름만, 혹시 키·주소가 섞이면 가림"""
     s = type(e).__name__ if isinstance(e, BaseException) else str(e)
     k = service_key()
     if k:
@@ -117,106 +141,13 @@ def _call_arrivals(ars):
     return out
 
 
-@st.cache_data(ttl=CACHE_SEC, show_spinner=False)
+@st.cache_data(ttl=API_TTL, show_spinner=False)
 def arrivals(ars):
-    """45초 저장. 실패도 저장해서, API가 멈췄을 때 접속자마다 다시 부르지 않음"""
+    """60초 저장. 실패도 저장해서, API가 멈췄을 때 접속자마다 다시 부르지 않음"""
     try:
         return _call_arrivals(ars), ""
     except Exception as e:
         return [], safe_msg(e)
-
-
-class Tracker:
-    """N13 도착정보를 60초마다 조회해서, 노선별로 '앞차가 N13을 지나간 시각'을 기록 (track_buses.py와 같은 규칙:
-    남은 정류장 1로 보이던 차가 다음 조회에서 사라지면 통과, 기점 대기(MSG_TP 07)는 제외)"""
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.snapshot, self.snap_time, self.last_pass, self.prev = None, 0.0, {}, {}
-        threading.Thread(target=self.loop, daemon=True).start()
-
-    def loop(self):
-        while True:
-            try:
-                rows = _call_arrivals(N13)
-                now = dt.datetime.now(KST)
-                cur = {(r["노선"], r["차량"]): r for r in rows if r["MSG_TP"] != "07"}
-                with self.lock:
-                    for (rt, car), r in self.prev.items():
-                        if r["남은정류장"] == "1" and (rt, car) not in cur:
-                            self.last_pass[rt] = now
-                    self.prev, self.snapshot, self.snap_time = cur, rows, time.time()
-            except Exception:
-                pass  # 로그에 아무것도 남기지 않음(키가 섞일 일 없음)
-            time.sleep(60)
-
-
-@st.cache_resource
-def tracker():
-    return Tracker()
-
-
-# ---------------- 피드백 ----------------
-def feedback_endpoint():
-    return _secret("FEEDBACK_ENDPOINT")
-
-
-def send_feedback(payload):
-    """서버에서 Apps Script 웹 앱으로 보냄(주소는 브라우저에 전달되지 않음). 성공하면 True"""
-    url = feedback_endpoint()
-    if not url.startswith("https://script.google.com/"):
-        return False
-    try:
-        req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=10) as r:   # Apps Script는 302로 결과 페이지를 돌려줌(자동 따라감)
-            res = json.loads(r.read().decode("utf-8", "replace"))
-        return bool(res.get("ok"))
-    except Exception:
-        return False
-
-
-def fb_payload(b):
-    return {"노선": int(b["노선"]), "정류장": "N13", "도착예정시각": b["도착시각"],
-            "혼잡도": CONG[b["보통_혼잡"]], "탑승가능성": b["보통_탑승"]}
-
-
-def on_feedback(bid, q, b):
-    ss = st.session_state
-    key = f"fb_{bid}_{q}"
-    val = ss.get(key)
-    done = ss.setdefault("fb_done", set())
-    if val not in ("예", "아니요") or (bid, q) in done:
-        return
-    p = fb_payload(b)
-    p["혼잡했나요"] = val if q == "혼잡" else ""
-    p["탈수있었나요"] = val if q == "탑승" else ""
-    ans = ss.setdefault("fb_ans", {})
-    if ss.get("demo_mode"):          # 예시 화면: 저장하지 않고 눌린 것으로만 표시
-        done.add((bid, q))
-        ans[(bid, q)] = val
-    elif send_feedback(p):
-        done.add((bid, q))
-        ans[(bid, q)] = val
-    else:
-        ss["fb_broken"] = True
-        ss[key] = None
-
-
-def feedback_box(bid, b):
-    ss = st.session_state
-    if not (feedback_endpoint() or ss.get("demo_mode")) or ss.get("fb_broken"):
-        return
-    done = ss.setdefault("fb_done", set())
-    with st.container(horizontal=True, gap="large"):   # 휴대폰에서도 두 질문을 한 줄에
-        st.segmented_control("이 버스 혼잡했나요?", ["예", "아니요"], key=f"fb_{bid}_혼잡",
-                             disabled=(bid, "혼잡") in done, on_change=on_feedback, args=(bid, "혼잡", b))
-        st.segmented_control("탈 수 있었나요?", ["예", "아니요"], key=f"fb_{bid}_탑승",
-                             disabled=(bid, "탑승") in done, on_change=on_feedback, args=(bid, "탑승", b))
-    if (bid, "혼잡") in done or (bid, "탑승") in done:
-        ans = ss.get("fb_ans", {})
-        got = " · ".join(f"{lab}: {ans[(bid, q)]}" for q, lab in [("혼잡", "혼잡했나요"), ("탑승", "탈 수 있었나요")] if (bid, q) in ans)
-        st.caption(("예시 화면이라 저장하지 않았어요" if ss.get("demo_mode") else "고마워요! 저장됐어요") + f" ({got})")
 
 
 # ---------------- 예측 ----------------
@@ -252,7 +183,7 @@ def crowd_window(P, route, day, t_arr):
 
 def predict_bus(P, S, route, eta, now, day, last_pass=None):
     t_arr = now + dt.timedelta(minutes=eta)
-    res = {"노선": route, "도착분": eta, "도착시각": t_arr.strftime("%H:%M"), "예측": False}
+    res = {"노선": route, "도착분": eta, "도착시각": t_arr.strftime("%H:%M"), "도착dt": t_arr, "예측": False}
     key = (route, day, t_arr.hour)
     if t_arr.hour not in SERVICE_HOURS or key not in P.index:
         return res
@@ -271,91 +202,336 @@ def predict_bus(P, S, route, eta, now, day, last_pass=None):
     return res
 
 
-def planned_buses(S, routes, now, live, per_route):
-    """시간표 예정: 같은 노선 실시간 버스가 있으면 그 버스(+여유) 이후 예정만 → 같은 버스가 두 번 안 보임"""
+def sched_etas(S, route, now, offset, horizon=90):
+    """시간표: 이 정류장에 오기까지 남은 분 목록 (N13 예정 − offset)"""
     m = now.hour * 60 + now.minute
-    out = []
-    for rt in routes:
-        s = S[(S["노선"] == rt) & (S["N13예정분"] >= m) & (S["N13예정분"] <= m + 60)].sort_values("N13예정분")
-        etas = [b["도착분"] for b in live if b["노선"] == rt]
-        if etas:
-            last = m + max(etas)
-            hw = sched_headway(S, rt, now + dt.timedelta(minutes=max(etas))) or 10
-            s = s[s["N13예정분"] > last + max(3, hw / 2)]
-        for _, x in s.head(per_route).iterrows():
-            out.append({"노선": rt, "도착분": int(x["N13예정분"] - m), "예정시각": x["예정시각"]})
-    return out
+    v = S.loc[S["노선"] == route, "N13예정분"] - offset - m
+    return sorted(int(x) for x in v if 0 <= x <= horizon)
 
 
-# ---------------- 화면 ----------------
-def route_pill(rt):
-    return (f"<span style='background:{ROUTE_COLOR.get(rt, UNKNOWN)};color:#fff;border-radius:6px;"
-            f"padding:1px 8px;font-weight:700;white-space:nowrap'>{rt}번</span>")
+def merge_etas(live, sched, S, route, now):
+    """실시간 + 시간표. 실시간 버스가 있으면 그 버스(+여유) 이후 시간표만 → 같은 버스 두 번 안 셈"""
+    out = [(e, "실시간") for e in sorted(live)]
+    if live:
+        hw = sched_headway(S, route, now + dt.timedelta(minutes=max(live))) or 10
+        sched = [e for e in sched if e > max(live) + max(3, hw / 2)]
+    return out + [(e, "시간표") for e in sched]
 
 
-def source_badge(kind):
-    if kind == "실시간":
-        return "<span style='background:#e7f3ea;color:#1d6b2f;border:1px solid #1d6b2f;border-radius:10px;padding:0 7px;font-size:0.78rem'>● 실시간</span>"
-    return "<span style='background:#fff;color:#555;border:1px dashed #888;border-radius:10px;padding:0 7px;font-size:0.78rem'>○ 예정(시간표)</span>"
+# ---------------- 백그라운드: N13 조회 + 버스별 웹 예측 기억 ----------------
+class Tracker:
+    """N13 도착정보를 60초마다 조회
+    - 앞차 통과 시각(track_buses.py 규칙: 남은 정류장 1로 보이던 차가 다음 조회에서 사라지면 통과, 기점 대기 MSG_TP 07 제외)
+    - 버스(노선·차량)마다 마지막으로 계산한 웹 예측(혼잡도·탑승 가능성)과 예측 도착·실제 통과 시각 → 피드백 짝짓기에 사용
+      (차량번호는 서버 메모리에만 있고 화면·저장에는 쓰지 않음, 3시간 지나면 지움)"""
+
+    def __init__(self, P, S_all):
+        self.P, self.S_all = P, S_all
+        self.lock = threading.Lock()
+        self.snapshot, self.snap_time, self.last_pass, self.prev, self.store = None, 0.0, {}, {}, {}
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def step(self):
+        rows = _call_arrivals(N13)
+        now = dt.datetime.now(KST).replace(second=0, microsecond=0)
+        day, kind, _ = day_info(now)
+        S = self.S_all[self.S_all["일정"] == kind]
+        cur = {(r["노선"], r["차량"]): r for r in rows if r["MSG_TP"] != "07"}
+        with self.lock:
+            for key, r in self.prev.items():
+                if key not in cur:
+                    if r["남은정류장"] == "1":
+                        self.last_pass[key[0]] = now
+                    e = self.store.get(key)
+                    if e and e["통과"] is None and r["도착분"] <= 2:
+                        e["통과"] = now
+            for key, r in cur.items():
+                if r["노선"] not in ALL_ROUTES:
+                    continue
+                b = predict_bus(self.P, S, r["노선"], r["도착분"], now, day, self.last_pass.get(r["노선"]))
+                if b["예측"]:
+                    self.store[key] = {"노선": r["노선"], "예측도착": b["도착dt"], "통과": None,
+                                       "혼잡도": CONG[b["보통_혼잡"]], "탑승가능성": b["보통_탑승"]}
+            old = now - dt.timedelta(hours=3)
+            self.store = {k: v for k, v in self.store.items() if v["예측도착"] > old}
+            self.prev, self.snapshot, self.snap_time = cur, rows, time.time()
+
+    def loop(self):
+        while True:
+            try:
+                self.step()
+            except Exception:
+                pass  # 로그에 아무것도 남기지 않음(키가 섞일 일 없음)
+            time.sleep(60)
+
+    def entries(self):
+        with self.lock:
+            return [dict(v) for v in self.store.values()]
 
 
-def card(b, demo=False):
-    when = "곧 도착" if b["도착분"] <= 1 else f"{b['도착분']}분 후"
-    head = (f"<div style='font-size:1.1rem'>{route_pill(b['노선'])} <b>{when}</b> "
-            f"<span style='color:#666;font-size:0.85rem'>({b['도착시각']})</span> {source_badge(b['종류'])}</div>")
-    if not b["예측"]:
-        body = "<div style='color:#666;font-size:0.9rem'>지원 시간(09~21시) 밖이라 예측하지 않아요</div>"
-        c = "#bbb"
+@st.cache_resource
+def tracker():
+    P, S, _, _ = load_tables()
+    return Tracker(P, S)
+
+
+# ---------------- 피드백 ----------------
+def feedback_endpoint():
+    return _secret("FEEDBACK_ENDPOINT")
+
+
+def send_feedback(payload):
+    """서버에서 Apps Script 웹 앱으로 보냄(주소는 브라우저에 전달되지 않음). 성공하면 True"""
+    url = feedback_endpoint()
+    if not url.startswith("https://script.google.com/"):
+        return False
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as r:   # Apps Script는 302로 결과 페이지를 돌려줌(자동 따라감)
+            res = json.loads(r.read().decode("utf-8", "replace"))
+        return bool(res.get("ok"))
+    except Exception:
+        return False
+
+
+def match_bus(route, now, demo, P, S, day):
+    """누른 시각과 가장 가까운, 이미 도착한 그 노선 버스(40분 전 ~ 지금, 예측 오차 2분 허용) + 그 버스에 대한 웹 예측"""
+    if demo:
+        m = now.hour * 60 + now.minute
+        s = S[(S["노선"] == route) & (S["N13예정분"] >= m - 40) & (S["N13예정분"] <= m + 2)]
+        if s.empty:
+            return None
+        v = int(s.loc[(s["N13예정분"] - m).abs().idxmin(), "N13예정분"])
+        b = predict_bus(P, S, route, v - m, now, day)
+        if not b["예측"]:
+            return None
+        return {"도착시각": b["도착시각"], "도착시각구분": "예측", "혼잡도": CONG[b["보통_혼잡"]], "탑승가능성": b["보통_탑승"]}
+    best = None
+    for e in tracker().entries():
+        if e["노선"] != route:
+            continue
+        ref = e["통과"] or e["예측도착"]
+        diff = (now - ref).total_seconds() / 60
+        if -2 <= diff <= 40 and (best is None or abs(diff) < best[0]):
+            best = (abs(diff), e, ref)
+    if not best:
+        return None
+    _, e, ref = best
+    return {"도착시각": ref.strftime("%H:%M"), "도착시각구분": "실측" if e["통과"] else "예측",
+            "혼잡도": e["혼잡도"], "탑승가능성": e["탑승가능성"]}
+
+
+def recent_route(default):
+    """방금 N13을 지나간 노선(30분 안, 가장 최근)"""
+    try:
+        now = dt.datetime.now(KST)
+        passed = [e for e in tracker().entries() if e["통과"] and (now - e["통과"]).total_seconds() < 1800]
+        if passed:
+            return max(passed, key=lambda e: e["통과"])["노선"]
+    except Exception:
+        pass
+    return default
+
+
+def on_answer(bid, bus, route):
+    ss = st.session_state
+    a1, a2 = ss.get(f"fbq_{bid}_혼잡"), ss.get(f"fbq_{bid}_탑승")
+    done = ss.setdefault("fb_done", {})
+    if bid in done or a1 not in ("예", "아니요") or a2 not in ("예", "아니요"):
+        return
+    p = {"노선": int(route), "정류장": "N13", "도착시각": bus["도착시각"], "도착시각구분": bus["도착시각구분"],
+         "혼잡도": bus["혼잡도"], "탑승가능성": bus["탑승가능성"], "혼잡했나요": a1, "탈수있었나요": a2}
+    if ss.get("demo_mode") or send_feedback(p):
+        done[bid] = (a1, a2)
     else:
-        lv = b["보통_탑승"]
-        c = STAGE_COLOR[lv]
-        warn = (f"<div style='color:#8f2410;font-size:0.85rem'>⚠ 몰림 주의 {b['몰림주의']} "
-                f"(N13 쪽 수업이 많이 끝나는 시간대 규칙)</div>") if b["몰림주의"] else ""
-        note = "시간표 기준 예정이라 실제 도착은 달라질 수 있어요 · " if b["종류"] == "예정" else ""
-        body = (f"<div style='margin-top:2px'><b style='color:{c}'>{BOARD_TEXT[lv]}</b></div>"
-                f"<div style='font-size:0.9rem'>탑승 가능성 <b>{lv}</b> (못 탈 확률 {PROB[lv]}, 추정) · "
-                f"{CONG[b['보통_혼잡']]} · 약 {b['보통_도착']:.0f}명</div>"
-                f"<div style='color:#555;font-size:0.85rem'>붐비는 날이면: {b['붐빔_탑승']} ({PROB[b['붐빔_탑승']]}) · "
-                f"{CONG[b['붐빔_혼잡']]} · 약 {b['붐빔_도착']:.0f}명</div>"
-                f"<div style='color:#888;font-size:0.78rem'>{note}앞차 간격 {b['앞차간격']:.0f}분({b['간격출처']})"
-                f"{' · 예시' if demo else ''} · 인원은 추정</div>{warn}")
-    st.markdown(f"<div style='border-left:6px solid {c};padding:6px 10px;background:#f6f7f9;color:#1f1f1f;"
-                f"border-radius:6px'>{head}{body}</div>", unsafe_allow_html=True)
+        ss["fb_broken"] = True
 
 
-def demo_arrivals(S, now, routes, ars_offset=0):
-    """예시 모드: 시간표 N13 도착 예정으로 가상 도착 목록 (정류장별 차이는 ars_offset분)"""
-    m = now.hour * 60 + now.minute
+# ---------------- 화면 조각 ----------------
+CSS = """
+<style>
+.block-container{padding-top:3.2rem;padding-bottom:2rem;max-width:560px}
+[data-testid="stHeaderActionElements"],.stMarkdown h1 a,.stMarkdown h2 a,.stMarkdown h3 a{display:none!important}
+.n13-title{text-align:center;font-size:1.45rem;font-weight:700;color:#111827;margin:0;line-height:1.3}
+.n13-sub{text-align:center;font-size:.82rem;color:#4b5563;margin:2px 0 10px}
+.n13-card{background:#fff;border:1px solid #d1d5db;border-radius:12px;padding:12px 14px;margin:0 0 8px;color:#111827}
+.n13-card.plan{border-style:dashed;background:#fafafa}
+.n13-card.plan .n13-body{opacity:.85}
+.n13-lead{font-size:1.2rem;font-weight:700;line-height:1.45}
+.n13-sec{font-size:1rem;font-weight:700;color:#111827;margin:18px 0 8px}
+.n13-pill{display:inline-block;color:#fff;border-radius:8px;padding:0 8px;font-weight:700;font-size:.95rem;line-height:1.6;white-space:nowrap}
+.n13-tag{display:inline-block;font-size:.75rem;color:#4b5563;border:1px dashed #6b7280;border-radius:999px;padding:0 7px;margin-left:4px;vertical-align:middle}
+.n13-tag.live{color:#111827;border:1px solid #111827;font-weight:600}
+.n13-chip{display:inline-block;border-radius:8px;padding:2px 10px;font-weight:700;font-size:1.05rem}
+.n13-sm{font-size:.88rem;color:#374151;line-height:1.5}
+.n13-mu{font-size:.8rem;color:#4b5563;line-height:1.5}
+.n13-best{border:2px solid #111827}
+.n13-note{font-size:.88rem;color:#374151;background:#f3f4f6;border-radius:12px;padding:8px 12px;margin:0 0 8px}
+.n13-warn{font-size:.85rem;color:#7f1d1d;font-weight:600;margin-top:2px}
+div[data-testid="stButtonGroup"] button{min-height:44px;min-width:64px}
+label[data-testid="stRadioOption"]{min-height:44px;align-items:center;padding-right:8px}
+details summary{min-height:44px}
+</style>
+"""
+
+
+def pill(rt):
+    return f"<span class='n13-pill' style='background:{ROUTE_COLOR.get(rt, GRAY)}'>{rt}번</span>"
+
+
+def tag(kind):
+    return "<span class='n13-tag live'>● 실시간</span>" if kind == "실시간" else "<span class='n13-tag'>○ 시간표 기준</span>"
+
+
+BIDX = {v: k for k, v in BOARD.items()}   # 탑승 가능성 → 1(높음)~4(낮음)
+
+
+def chip(level):
+    """탑승 가능성 칩 (색 + 글자). 색은 노랑→주황→빨강 계열로 버스 번호 색(파랑·녹색)과 겹치지 않음"""
+    bg, fg = CHIP[BIDX[level]]
+    return f"<span class='n13-chip' style='background:{bg};color:{fg}'>{level}</span>"
+
+
+def board_line(level):
+    return (f"<div style='margin-top:6px'>{chip(level)} <b>{BOARD_TEXT[level]}</b> "
+            f"<span class='n13-sm'>(못 탈 확률 {PROB[level]})</span></div>")
+
+
+def when(m):
+    return "곧 도착" if m <= 1 else f"{m}분 후"
+
+
+def html(s):
+    # 물결표(~)가 두 개 있으면 마크다운이 취소선으로 바꿔서, HTML 문자로 바꿔 넣음
+    st.markdown(s.replace("~", "&#126;"), unsafe_allow_html=True)
+
+
+def bus_card(b, demo):
+    plan = b["종류"] != "실시간"
+    head = (f"<div>{pill(b['노선'])} <b style='font-size:1.05rem'>{when(b['도착분'])}</b> "
+            f"<span class='n13-mu'>{b['도착시각']}</span>{tag(b['종류'])}</div>")
+    if not b["예측"]:
+        html(f"<div class='n13-card{' plan' if plan else ''}'>{head}<div class='n13-mu'>지원 시간(09~21시) 밖이라 예측하지 않아요</div></div>")
+        return
+    lv, lv2 = b["보통_탑승"], b["붐빔_탑승"]
+    warn = f"<div class='n13-warn'>붐비는 날에는 '{lv2}'까지 낮아질 수 있어요</div>" if BIDX[lv2] > BIDX[lv] else ""
+    extra = " · 시간표 기준이라 실제 도착은 달라질 수 있어요" if plan else ""
+    html(f"<div class='n13-card{' plan' if plan else ''}' style='border-left:6px solid {BAR[BIDX[lv]]}'>{head}"
+         f"<div class='n13-body'>{board_line(lv)}{warn}"
+         f"<div class='n13-mu' style='margin-top:2px'>버스 안 {CONG[b['보통_혼잡']]} · 약 {b['보통_도착']:.0f}명 · "
+         f"앞차 간격 {b['앞차간격']:.0f}분({b['간격출처']}){extra}{' · 예시' if demo else ''}</div></div></div>")
+
+
+def demo_arrivals(S, now, routes, offset=0):
+    """예시 모드: 시간표로 만든 가상 도착 (노선마다 가장 가까운 1대, 실제 API처럼)"""
     out = []
     for rt in routes:
-        s = S[(S["노선"] == rt) & (S["N13예정분"] + ars_offset >= m) & (S["N13예정분"] + ars_offset <= m + 60)].sort_values("N13예정분").head(3)
-        for v in s["N13예정분"]:
-            out.append({"노선": rt, "차량": f"예시{rt}-{v}", "도착분": int(v + ars_offset - m), "남은정류장": "", "MSG_TP": ""})
+        e = sched_etas(S, rt, now, offset, 60)
+        if e:
+            out.append({"노선": rt, "차량": f"예시{rt}-{e[0]}", "도착분": e[0], "남은정류장": "", "MSG_TP": ""})
     return out
 
 
-def tashu_line(T):
-    """타슈: 근처 대여소가 있을 때만 (data/tashu_near.csv). 실시간 대수 API는 아직 동작 안 함 → '준비 중'"""
-    if T.empty or not {"N13", "현충원역"} <= set(T["쪽"]):
+def tashu_info(T):
+    """타슈: N13 근처 대여소와 걷는 시간만 (data/tashu_near.csv). 실시간 대수 API는 아직 동작 안 함 → '준비 중'"""
+    if T.empty or "N13" not in set(T["쪽"]):
         return None
     a = T[T["쪽"] == "N13"].sort_values("걷는거리_m").iloc[0]
-    b = T[T["쪽"] == "현충원역"].sort_values("걷는거리_m").iloc[0]
-    ride = T["자전거_대여소간_분"].iloc[0] if "자전거_대여소간_분" in T else None
-    if ride != ride or ride is None:
-        return None
-    total = a["걷는시간_분"] + ride
-    name_a = a["대여소명"].split(" ", 1)[-1]
-    name_b = b["대여소명"].split(" ", 1)[-1]
-    return total, (f"- **현충원역까지 타슈** (약 {total:.0f}분): {name_a} 대여소까지 걸어서 약 {a['걷는시간_분']:.0f}분 → "
-                   f"자전거 약 {ride:.0f}분 → {name_b} 대여소 (대여·반납 시간 제외, 추정) · 실시간 대수는 준비 중")
+    return {"이름": a["대여소명"].split(" ", 1)[-1], "걷기": round(a["걷는시간_분"])}
 
 
-def main():
-    st.set_page_config(page_title="N13 하교 버스", page_icon="🚌", layout="centered")
-    st.markdown("<style>.block-container{padding-top:1.2rem;max-width:640px}</style>", unsafe_allow_html=True)
-    P, S_all, T = load_tables()
-    qp = st.query_params
-    demo = "demo" in qp
+REALTIME_ONLY = {48, 300, 340}   # 대전 시간표에 없음 → 대전 도착정보(41400)에 잡힐 때만
+
+
+def place_options(routes, demo, S, A, now, day, P, ratio, last_pass, in_service):
+    """대체 장소마다: 걸어서(+여유) 도착한 뒤 탈 수 있는 첫 버스(실시간, 없으면 시간표)와 그 버스의 탑승 가능성.
+    탑승 가능성(추정) = 그 정류장을 떠날 때 버스 안 인원을 28/40/55명 기준에 넣은 단계
+      정문: 정문을 떠날 때 = N13 도착 인원 / 수통골삼거리·덕명중·수통골입구: N13 도착 인원 × 정류장 비율(alt_stop_ratio.csv)
+    혼잡도(보조) = 그 정류장에 올 때 버스 안 인원 (정문은 앞 정류장 비율, 나머지는 위와 같음)
+    탈 버스가 없어도 빼지 않고 이유(상태)를 붙여서 돌려줌"""
+    m = now.hour * 60 + now.minute
+    opts = []
+    for name, ars, walk, prts, offset, note in PLACES:
+        base = {"장소": name, "걷기": walk, "버스": None, "설명": note}
+        rts = [r for r in prts if r in routes] if offset is not None else prts
+        if not rts:
+            opts.append({**base, "상태": f"고른 노선은 이 정류장을 지나지 않아요 (이 정류장: {'·'.join(map(str, prts))}번)"})
+            continue
+        if demo:
+            rows, err = (demo_arrivals(S, now, rts, offset), "") if offset is not None else ([], "")
+        else:
+            rows, err = arrivals(ars)
+        best, no_info, later = None, [], []
+        for rt in rts:
+            live = [r["도착분"] for r in rows if r["노선"] == rt and r["MSG_TP"] != "07"]
+            if offset is not None:
+                sched = sched_etas(S, rt, now, offset, horizon=24 * 60)
+            else:   # 덕명네거리: 107번은 시간표(parse_timetable_alt.py), 48·300·340번은 실시간만
+                sched = sorted(int(v - m) for v in A.loc[A["노선"] == rt, "예정분"] if v - m >= 0)
+            if not live and not sched:
+                no_info.append(rt)
+                continue
+            cands = merge_etas(live, sched, S, rt, now)
+            ok = [(e, k) for e, k in cands if e > walk + BUFFER]
+            if not ok:
+                no_info.append(rt)
+                continue
+            e, kind = ok[0]
+            if e > 90:   # 너무 먼 버스(새벽 등)는 '다음 버스 시각'만 이유로 적음
+                later.append(f"{rt}번 {(now + dt.timedelta(minutes=e)).strftime('%H:%M')}")
+                continue
+            s, ppl, lv = None, None, None
+            if offset is not None and in_service:
+                b = predict_bus(P, S, rt, e + offset, now, day, last_pass.get(rt) if kind == "실시간" else None)
+                if b["예측"]:
+                    r = ratio.get((rt, b["도착dt"].hour), 1.0)
+                    leave = b["보통_도착"] if name == "정문" else b["보통_도착"] * r
+                    ppl = b["보통_도착"] * r
+                    s, lv = stage(ppl), BOARD[stage(leave)]
+            cand = {**base, "버스": rt, "탈분": e, "종류": kind, "혼잡": s, "인원": ppl, "탑승": lv}
+            if best is None or rank_key(cand) < rank_key(best):
+                best = cand
+        miss_rt = [r for r in no_info if r in REALTIME_ONLY]
+        miss_sc = [r for r in no_info if r not in REALTIME_ONLY]
+        why_parts = ([f"{'·'.join(map(str, miss_rt))}번은 실시간 정보 없음"] if miss_rt else []) + \
+                    ([f"{'·'.join(map(str, miss_sc))}번은 오늘 남은 버스 없음"] if miss_sc else [])
+        if best:
+            if why_parts:
+                best["설명"] = note + " · " + " · ".join(why_parts)
+            opts.append(best)
+        elif later:
+            opts.append({**base, "상태": "90분 안에 탈 수 있는 버스 없음 · 다음 버스(시간표 기준) " + ", ".join(sorted(later, key=lambda x: x[-5:])[:2])
+                         + (" · " + " · ".join(why_parts) if miss_rt else "")})
+        else:
+            opts.append({**base, "상태": ("실시간 정보를 불러오지 못했어요 · " if err else "") + (" · ".join(why_parts) or "오늘 남은 버스 없음")})
+    return opts
+
+
+TAXI = {"장소": "택시", "걷기": 0, "버스": None, "설명": "", "상태": "최후의 수단"}
+
+
+def option_card(o, best=False, demo=False):
+    plan = o.get("종류") == "시간표"
+    badge = "<span class='n13-tag live'>추천</span>" if best else ""
+    walk = "" if o["장소"] in ("N13에서 기다리기", "택시", "타슈") else f"걸어서 {o['걷기']:g}분 · "
+    if o.get("버스") is None:
+        body = f"<div class='n13-sm'>{walk}{o['상태']}</div>"
+    else:
+        main = board_line(o["탑승"]) if o.get("탑승") else ""
+        sub = f"<div class='n13-mu'>버스 안 {CONG[o['혼잡']]} · 약 {o['인원']:.0f}명</div>" if o.get("혼잡") else \
+              ("<div class='n13-mu'>탑승 가능성 예측 없음</div>" if o.get("탑승") is None else "")
+        body = f"<div class='n13-sm'>{walk}{pill(o['버스'])} <b>{o['탈분']}분 뒤 탑승</b>{tag(o['종류'])}</div>{main}{sub}"
+    desc = (o["설명"] or "") + (" · 예시" if demo and o["설명"] else "")
+    title = "택시 · 최후의 수단" if o["장소"] == "택시" else o["장소"]
+    if o["장소"] == "택시":
+        body = ""
+    html(f"<div class='n13-card{' plan' if plan else ''}{' n13-best' if best else ''}'>"
+         f"<div style='font-weight:700'>{title}{badge}</div><div class='n13-body'>{body}"
+         + (f"<div class='n13-mu'>{desc}</div>" if desc else "") + "</div></div>")
+
+
+def get_now(demo, qp):
     now = dt.datetime.now(KST).replace(second=0, microsecond=0)
     if demo:
         try:
@@ -363,26 +539,37 @@ def main():
             now = now.replace(hour=hh, minute=mm)
         except ValueError:
             pass
-    dq = qp.get("day") if demo and qp.get("day") in list(DAYS) else None
-    day, sched_kind, weekend = day_info(now, dq)
-    S = S_all[S_all["일정"] == sched_kind]
+    return now
+
+
+def rank_key(o):
+    """탈 만한 방법(탑승 가능성 높음·다소 높음, 또는 예측 없음)이 먼저 → 타는 시각이 빠른 순 → 탑승 가능성이 높은 순"""
+    b = BIDX.get(o.get("탑승"), 2.5)
+    return (b > 2.5, o["탈분"], b)
+
+
+@st.fragment(run_every=CACHE_SEC)
+def live_section(routes, demo, dq):
+    """자동 갱신 부분. 이 안의 오류도 화면에는 일반 안내만 보이게 감쌈"""
+    try:
+        _live_section(routes, demo, dq)
+    except Exception as e:
+        if type(e).__module__.startswith("streamlit"):
+            raise
+        st.error("일시적인 오류가 생겼어요. 잠시 후 새로고침해 주세요.")
+
+
+def _live_section(routes, demo, dq):
+    """결론 → 버스 목록 → 다른 방법. 45초마다 이 부분만 다시 그림(API는 서버 저장값 사용)"""
+    P, S_all, T, ratio = load_tables()
+    now = get_now(demo, st.query_params)
+    day, kind, weekend = day_info(now, dq)
+    S = S_all[S_all["일정"] == kind]
     in_service = now.hour in SERVICE_HOURS
 
-    st.markdown("### 🚌 N13 하교 버스")
-    st.caption("출발: 삼성화재연수원 정류장(41730) · 하교 방향")
-    shown_day = dq or DAYS[now.weekday()]
-    st.caption(f"기준 시각 {now:%H:%M} ({shown_day}요일)" + (" · **예시 화면: 시간표로 만든 가상 도착**" if demo else ""))
-    if weekend and in_service:
-        st.warning("**주말은 평일보다 승객이 적어요.** 주말 자료가 없어 금요일 기준으로 예측하니 참고만 하세요.", icon="📅")
-
-    utype = st.radio("어떻게 가요?", ["지하철 환승 (현충원역 방면 아무 버스)", "특정 노선"], horizontal=True)
-    special = utype.startswith("특정")
-    routes = [st.selectbox("노선", ALL_ROUTES, index=1)] if special else HY_ROUTES
-
-    # 실시간 도착 (N13)
     err, last_pass = "", {}
     if demo:
-        raw = list({r["노선"]: r for r in sorted(demo_arrivals(S, now, routes), key=lambda r: -r["도착분"])}.values())  # 실제 API처럼 노선마다 가장 가까운 1대
+        raw = demo_arrivals(S, now, routes)
     else:
         tr = tracker()
         with tr.lock:
@@ -392,173 +579,191 @@ def main():
         else:
             raw, err = arrivals(N13)
     raw = [r for r in raw if r["노선"] in routes and r["MSG_TP"] != "07"]
+    A = load_alt()
+    A = A[A["일정"] == kind]
+    places = place_options(routes, demo, S, A, now, day, P, ratio, last_pass, in_service)
+    tashu = tashu_info(T)
+    tashu_opt = ({"장소": "타슈", "걷기": tashu["걷기"], "버스": None, "설명": "공영자전거 · 실시간 대수는 준비 중",
+                  "상태": f"근처 대여소({tashu['이름']})까지 걸어서 약 {tashu['걷기']}분"} if tashu else
+                 {"장소": "타슈", "걷기": 0, "버스": None, "설명": "공영자전거", "상태": "근처 대여소 정보 없음"})
 
     if not in_service:
-        st.info("**이 서비스는 평일 09~21시만 지원해요.** 지금은 예측 대신 실시간 도착 시간만 참고로 보여드려요.", icon="🕘")
-        st.markdown("#### N13 실시간 도착 (참고)")
-        if err:
-            st.write("실시간 도착정보를 불러오지 못했어요.")
-        elif not raw:
-            st.write("지금 실시간으로 잡히는 버스가 없어요.")
+        html("<div class='n13-card'><div class='n13-lead'>이 서비스는 09~21시만 지원해요</div>"
+             "<div class='n13-sm'>지금은 예측 없이 실시간 도착만 보여드려요.</div></div>")
+        html("<div class='n13-sec'>N13 실시간 도착</div>")
+        if err or not raw:
+            html(f"<div class='n13-card n13-sm'>{'실시간 정보를 불러오지 못했어요' if err else '지금 실시간으로 잡히는 버스가 없어요'}</div>")
         for r in sorted(raw, key=lambda r: r["도착분"]):
             t = (now + dt.timedelta(minutes=r["도착분"])).strftime("%H:%M")
-            st.markdown(f"{route_pill(r['노선'])} {r['도착분']}분 후 ({t}) {source_badge('실시간')}", unsafe_allow_html=True)
-        footer()
+            html(f"<div class='n13-card'>{pill(r['노선'])} <b>{when(r['도착분'])}</b> <span class='n13-mu'>{t}</span>{tag('실시간')}</div>")
+        html("<div class='n13-sec'>다른 방법</div>")
+        for o in places + [tashu_opt, TAXI]:
+            option_card(o, demo=demo)
         return
 
-    live = []
-    for r in raw:
-        b = predict_bus(P, S, r["노선"], r["도착분"], now, day, last_pass.get(r["노선"]))
-        b.update({"종류": "실시간", "id": f"{r['노선']}_{r['차량'] or r['도착분']}"})
-        live.append(b)
-    plan = []
-    for x in planned_buses(S, routes, now, live, per_route=3 if special else 1):
-        b = predict_bus(P, S, x["노선"], x["도착분"], now, day)
-        b.update({"종류": "예정", "id": f"{x['노선']}_예정{x['예정시각']}"})
-        plan.append(b)
-    buses = sorted(live + plan, key=lambda b: b["도착분"])
+    # N13 버스 (실시간 + 시간표 기준)
+    buses = []
+    for rt in routes:
+        live = sorted(r["도착분"] for r in raw if r["노선"] == rt)
+        cands = merge_etas(live, sched_etas(S, rt, now, 0, 60), S, rt, now)
+        for e, k in cands[: 1 if len(routes) > 2 else 3]:
+            b = predict_bus(P, S, rt, e, now, day, last_pass.get(rt) if k == "실시간" else None)
+            b["종류"] = k
+            buses.append(b)
+    buses.sort(key=lambda b: b["도착분"])
     pred = [b for b in buses if b["예측"]]
 
-    # 이동 방법 비교
-    ok = [b for b in pred if b["보통_탑승"] in ("높음", "다소 높음")]
-    best = min(ok, key=lambda b: b["도착분"]) if ok else None
-    alt = {}
-    for name, ars, walk, rts in [("정문", GATE, WALK["정문"], routes),
-                                 ("수통골삼거리", SUTONG, WALK["수통골삼거리"], [x for x in routes if x in (11, 102, 104)]),
-                                 ("덕명네거리", DEOKMYEONG, WALK["덕명네거리"], [] if special else [48, 107])]:
-        if not rts:
-            continue
-        if demo:
-            off = {"정문": -1, "수통골삼거리": -3}.get(name)
-            if off is None:
-                alt[name] = "예시"
-                continue
-            rows, e2 = demo_arrivals(S, now, rts, off), ""
-        else:
-            rows, e2 = arrivals(ars)
-        if e2:
-            alt[name] = "오류"
-            continue
-        cand = sorted([r for r in rows if r["노선"] in rts and r["도착분"] >= walk], key=lambda r: r["도착분"])
-        alt[name] = cand[0] if cand else None
-    tashu = tashu_line(T) if not special or routes[0] in HY_ROUTES else None
+    # 추천 순위: N13에서 기다리기(탑승 가능성 '높음·다소 높음' 버스만 — '다소 낮음·낮음'은 못 탈 수도 있어서 뺌) + 대체 장소.
+    # 타는 시각이 빠른 순 → 같으면 덜 붐비는 순
+    opts = []
+    n13ok = [b for b in pred if b["보통_탑승"] in ("높음", "다소 높음")]
+    if n13ok:
+        b = min(n13ok, key=lambda b: (b["도착분"], b["보통_혼잡"]))
+        opts.append({"장소": "N13에서 기다리기", "걷기": 0, "버스": b["노선"], "탈분": b["도착분"], "종류": b["종류"],
+                     "혼잡": b["보통_혼잡"], "인원": b["보통_도착"], "설명": "지금 있는 곳에서 기다려요", "탑승": b["보통_탑승"]})
+    else:   # 빼지 않고 이유를 적어서 '더 보기'에
+        opts.append({"장소": "N13에서 기다리기", "걷기": 0, "버스": None, "설명": "지금 있는 곳에서 기다려요",
+                     "상태": "1시간 안에 오는 버스가 모두 혼잡해요(탑승 가능성 다소 낮음 이하)" if pred else "1시간 안에 오는 버스 정보 없음"})
+    ranked = sorted([o for o in places + opts if o.get("버스") is not None], key=rank_key)
+    n13_bad = bool(pred) and pred[0]["보통_탑승"] in ("다소 낮음", "낮음")
+    # 정문은 N13 탑승 가능성이 '다소 낮음·낮음'일 때만 추천 후보
+    if not n13_bad:
+        ranked = [o for o in ranked if o["장소"] != "정문"] + [o for o in ranked if o["장소"] == "정문"]
+    others = [o for o in places + opts if o not in ranked]
+    top = ranked[0] if ranked else None
+    # 택시: 평소엔 '더 보기' 맨 아래, 버스 방법이 모두 20분 이상 걸릴 때만 위로
+    all_slow = not any(o["탈분"] < 20 for o in ranked)
 
-    # 한 문장 추천
-    def tag(b):
-        return " (시간표 예정)" if b["종류"] == "예정" else ""
+    # 1) 결론 한 문장
     if err and not pred:
-        msg = "실시간 도착정보를 불러오지 못했어요. 아래는 과거 통계(9~10월) 기반 예측이에요."
+        lead, sub = "실시간 정보를 불러오지 못했어요", "아래는 시간표와 과거 통계(9~10월)로 만든 예측이에요."
+    elif top and top["장소"] == "N13에서 기다리기":
+        lead = f"지금은 {'곧' if top['탈분'] <= 1 else str(top['탈분']) + '분 뒤'} {top['버스']}번이 {LEADB[top['탑승']]}"
+        before = [b for b in pred if b["도착분"] < top["탈분"]]
+        sub = f"그 전에 오는 {before[0]['노선']}번({when(before[0]['도착분'])})은 못 탈 가능성이 높아요." if before else ""
+        if top["종류"] != "실시간":
+            sub = (sub + " " if sub else "") + "시간표 기준 버스예요."
+    elif top:
+        lead = f"{top['장소']}까지 걸어가면 {top['탈분']}분 뒤 {top['버스']}번을 탈 수 있어요"
+        sub = (f"탑승 가능성 {top['탑승']} · {BOARD_TEXT[top['탑승']]}." if top.get("탑승") else "탑승 가능성 예측은 없어요.") + (" N13 버스는 혼잡해요." if n13_bad else "")
+    elif pred:
+        lead, sub = "N13에 오는 버스가 매우 혼잡해요", "아래 '다른 방법'도 확인하세요."
     else:
-        walk_opts = []
-        if isinstance(alt.get("수통골삼거리"), dict):
-            a = alt["수통골삼거리"]
-            walk_opts.append((a["도착분"], f"**수통골삼거리까지 약 11분** 걸으면 {a['도착분']}분 뒤 {route_pill(a['노선'])}을 정문 전에 비교적 여유 있게 탈 수 있어요(역주행)."))
-        if isinstance(alt.get("덕명네거리"), dict):
-            a = alt["덕명네거리"]
-            walk_opts.append((a["도착분"], f"**덕명네거리까지 약 12분** 걸으면 {a['도착분']}분 뒤 {route_pill(a['노선'])}(현충원역 방면)을 탈 수 있어요."))
-        walk_best = min(walk_opts, key=lambda x: x[0]) if walk_opts else None
-        crowded_near = [b for b in pred if b["보통_탑승"] in ("다소 낮음", "낮음") and (not best or b["도착분"] < best["도착분"])]
-        if best and (walk_best is None or best["도착분"] <= walk_best[0] + 3):
-            how = "여유 있게 탈 수 있는" if best["보통_탑승"] == "높음" else "서서 갈 수 있는"
-            msg = f"지금은 **N13에서 {best['도착분']}분** 기다리면 {how} {route_pill(best['노선'])}이 와요{tag(best)}."
-            if crowded_near:
-                msg += f" (그 전에 오는 {crowded_near[0]['노선']}번은 혼잡할 것 같아요)"
-        elif walk_best:
-            lead = (f"N13에서 탈 만한 버스는 {best['도착분']}분 뒤({best['노선']}번)라, " if best
-                    else "N13에 오는 버스가 혼잡할 것 같아요. ")
-            msg = lead + walk_best[1]
-        elif pred and tashu:
-            msg = f"가까운 버스가 혼잡할 것 같아요. 급하면 **현충원역까지 타슈(약 {tashu[0]:.0f}분)**도 있어요."
-        elif pred:
-            msg = "가까운 버스가 혼잡할 것 같아요. 아래 다른 방법도 확인해 보세요."
-        else:
-            msg = "지금 N13에 오는 버스 정보가 없어요. 아래 과거 통계 예측과 대체경로를 참고하세요."
-    msg = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", msg)  # HTML 안에서는 ** 대신 <b>
-    st.markdown(f"<div style='background:#eaf2fb;color:#1f1f1f;border-radius:8px;padding:10px 12px;margin:6px 0'>{msg}</div>",
-                unsafe_allow_html=True)
+        lead, sub = "지금 N13에 오는 버스 정보가 없어요", "아래 '다른 방법'을 확인하세요."
+    if all_slow and not (err and not pred):
+        sub = (sub + " " if sub else "") + "버스는 모두 20분 이상 기다려야 해요. 급하면 택시도 있어요."
+    html(f"<div class='n13-card'><div class='n13-lead'>{lead}</div>"
+         + (f"<div class='n13-sm' style='margin-top:2px'>{sub}</div>" if sub else "") + "</div>")
+    if weekend:
+        html("<div class='n13-note'>주말은 평일(금요일) 데이터로 추정한 값이에요.</div>")
+    crowd = sorted({b["몰림주의"] for b in pred if b["몰림주의"]})
+    if crowd:
+        html(f"<div class='n13-note'><b style='color:#7f1d1d'>몰림 주의 {crowd[0]}</b> · "
+             "N13 쪽 건물에서 수업이 많이 끝나는 시간대라, 표시보다 더 붐빌 수 있어요.</div>")
 
-    # 버스 목록
-    if not special and pred:
-        fast = min([b for b in pred if b["보통_탑승"] != "낮음"] or pred, key=lambda b: b["도착분"])
-        roomy = min([b for b in pred if b["도착분"] <= 30] or pred, key=lambda b: (b["보통_도착"], b["도착분"]))
-        st.markdown(f"**가장 빨리 탈 수 있는 버스:** {fast['노선']}번 {fast['도착분']}분 후{tag(fast)} · "
-                    f"**가장 여유 있는 버스:** {roomy['노선']}번 {roomy['도착분']}분 후 (약 {roomy['보통_도착']:.0f}명){tag(roomy)}")
-    c1, c2 = st.columns([3, 1])
-    c1.markdown("#### N13에 오는 버스")
-    c2.button("새로고침", use_container_width=True)
-    st.caption("● 실시간 = 지금 도착정보에 잡힌 버스 · ○ 예정 = 시간표 출발 + 이동 시간으로 계산(아직 출발 전)")
-
-    st.session_state["demo_mode"] = demo
-    fb_on = bool(feedback_endpoint()) or demo
-    if fb_on and st.session_state.get("fb_broken"):
-        st.caption("피드백 저장이 잠시 안 돼요. 나중에 다시 시도해 주세요.")
-    elif fb_on:
-        st.caption("버스마다 아래 버튼으로 알려주시면 예측이 맞았는지 확인하는 데 쓰여요.")
-    else:
-        st.caption("피드백 저장은 준비 중이에요.")
-    seen = st.session_state.setdefault("seen", {})
+    # 2) 버스 목록
+    html("<div class='n13-sec'>N13에 오는 버스 <span class='n13-mu' style='font-weight:400'>· 45초마다 자동 갱신</span></div>")
     if buses:
         for b in buses:
-            with st.container(border=True):
-                card(b, demo)
-                if fb_on and b["예측"]:
-                    feedback_box(b["id"], b)
-            if b["예측"]:
-                seen[b["id"]] = {**b, "본시각": time.time()}
+            bus_card(b, demo)
     else:
-        st.write("지금 실시간으로 잡히는 버스도, 1시간 안 시간표 예정도 없어요." if not err else "실시간 정보 없음")
-
-    # 방금 지나간 버스(목록에서 사라진 버스)에도 답할 수 있게
-    if fb_on and not st.session_state.get("fb_broken"):
-        gone = [v for k, v in seen.items() if k not in {b["id"] for b in buses} and time.time() - v["본시각"] < 30 * 60]
-        if gone:
-            with st.expander(f"방금 지나간 버스 알려주기 ({len(gone)}대)"):
-                for v in sorted(gone, key=lambda v: v["도착시각"]):
-                    st.markdown(f"{route_pill(v['노선'])} {v['도착시각']} · 탑승 가능성 {v['보통_탑승']}", unsafe_allow_html=True)
-                    feedback_box(v["id"], v)
-
-    # 버스가 없을 때: 과거 통계
-    if not pred:
+        html("<div class='n13-card n13-sm'>지금 실시간으로 잡히는 버스도, 1시간 안 시간표 버스도 없어요.</div>")
         h = now.hour
-        rows = [(rt, P.loc[(rt, day, h)]) for rt in routes if (rt, day, h) in P.index]
-        if rows:
-            st.markdown(f"**과거 통계({day}요일 {h}시, 9~10월 평균)**")
-            for rt, r in rows:
-                st.write(f"{rt}번: 보통 날 {r['보통_혼잡도']}·탑승 가능성 {r['보통_탑승가능성']} / 붐비는 날 {r['붐빔_혼잡도']}·{r['붐빔_탑승가능성']}")
+        for rt in routes:
+            if (rt, day, h) in P.index:
+                r = P.loc[(rt, day, h)]
+                html(f"<div class='n13-card n13-sm'>{pill(rt)} 과거 통계({day}요일 {h}시): 보통 날 {r['보통_혼잡도']} · 붐비는 날 {r['붐빔_혼잡도']}</div>")
 
-    # 대체경로
-    st.markdown("#### 다른 방법")
-    def line(name, walk, a, extra=""):
-        if a == "예시":
-            return f"- **{name}** (걸어서 약 {walk:.0f}분): 예시 화면에서는 실시간 도착을 보여주지 않아요"
-        if a == "오류":
-            return f"- **{name}** (걸어서 약 {walk:.0f}분): 실시간 정보를 불러오지 못했어요"
-        if a is None:
-            return f"- **{name}** (걸어서 약 {walk:.0f}분): 도착해서 탈 수 있는 버스가 아직 안 잡혀요"
-        return f"- **{name}** (걸어서 약 {walk:.0f}분): {route_pill(a['노선'])} {a['도착분']}분 후 도착{extra}"
-    if "정문" in alt:
-        st.markdown(line("정문으로 이동", WALK["정문"], alt["정문"], " · 버스는 덜 찬 채 오지만 정문에서 타려는 사람이 많아요"), unsafe_allow_html=True)
-    if "수통골삼거리" in alt:
-        st.markdown(line("역주행: 수통골삼거리", WALK["수통골삼거리"], alt["수통골삼거리"], " · 정문 전이라 비교적 여유(16시 102번 약 13명, 추정)"), unsafe_allow_html=True)
-    if "덕명네거리" in alt:
-        st.markdown(line("덕명네거리 48·107번", WALK["덕명네거리"], alt["덕명네거리"], " · 현충원역 방면, 혼잡 예측 없음"), unsafe_allow_html=True)
-    if tashu:
-        st.markdown(tashu[1])
-    footer()
+    # 3) 다른 방법: 상위 3개 + 더 보기
+    html("<div class='n13-sec'>어디서 탈까요? <span class='n13-mu' style='font-weight:400'>· 타는 시각이 빠른 순</span></div>")
+    if all_slow:
+        show = ranked[:2] + [TAXI]
+        rest = ranked[2:] + others + [tashu_opt]
+    else:
+        show = ranked[:3]
+        rest = ranked[3:] + others + [tashu_opt, TAXI]
+    for i, o in enumerate(show):
+        option_card(o, best=(i == 0 and o.get("버스") is not None), demo=demo)
+    with st.expander(f"다른 방법 더 보기 ({len(rest)}개)"):
+        for o in rest:
+            option_card(o, demo=demo)
+
+
+def feedback_section(routes, demo, dq):
+    P, S_all, _, _ = load_tables()
+    now = get_now(demo, st.query_params)
+    day, kind, _ = day_info(now, dq)
+    S = S_all[S_all["일정"] == kind]
+    ss = st.session_state
+    ss["demo_mode"] = demo
+    html("<div class='n13-sec'>버스를 타셨나요?</div>")
+    if not (feedback_endpoint() or demo):
+        html("<div class='n13-card n13-sm'>피드백 저장은 준비 중이에요.</div>")
+        return
+    if ss.get("fb_broken"):
+        html("<div class='n13-card n13-sm'>피드백 저장이 잠시 안 돼요. 나중에 다시 시도해 주세요.</div>")
+        return
+    if now.hour not in SERVICE_HOURS:
+        html("<div class='n13-card n13-sm'>피드백은 09~21시에 받아요.</div>")
+        return
+    if demo:   # 예시: 시간표상 방금(40분 안) N13에 도착한 노선
+        m = now.hour * 60 + now.minute
+        s = S[S["노선"].isin(routes) & (S["N13예정분"] <= m) & (S["N13예정분"] >= m - 40)]
+        default = int(s.loc[s["N13예정분"].idxmax(), "노선"]) if not s.empty else routes[0]
+    else:
+        default = recent_route(routes[0])
+    with st.container(border=True):
+        route = st.selectbox("노선", ALL_ROUTES, format_func=lambda r: f"{r}번",
+                             index=ALL_ROUTES.index(default) if default in ALL_ROUTES else 1, key="fb_route")
+        bus = match_bus(route, now, demo, P, S, day)
+        if not bus:
+            st.caption(f"최근 40분 안에 N13에 도착한 {route}번 버스를 찾지 못했어요.")
+            return
+        html(f"<div class='n13-sm'>{pill(route)} {bus['도착시각']} 도착 버스 · 웹 예측: {bus['혼잡도']}, 탑승 가능성 {bus['탑승가능성']}</div>")
+        bid = f"{route}_{bus['도착시각']}"
+        done = ss.setdefault("fb_done", {})
+        if bid in done:
+            a1, a2 = done[bid]
+            st.caption(("예시 화면이라 저장하지 않았어요" if demo else "고마워요! 저장됐어요") + f" (혼잡했나요: {a1} · 탈 수 있었나요: {a2})")
+            return
+        with st.container(horizontal=True, gap="large"):
+            st.segmented_control("혼잡했나요?", ["예", "아니요"], key=f"fbq_{bid}_혼잡", on_change=on_answer, args=(bid, bus, route))
+            st.segmented_control("탈 수 있었나요?", ["예", "아니요"], key=f"fbq_{bid}_탑승", on_change=on_answer, args=(bid, bus, route))
+        st.caption("두 질문에 답하면 바로 저장돼요. 예측이 맞았는지 확인하는 데 쓰여요. 이름·연락처는 받지 않아요.")
 
 
 def footer():
-    st.markdown("---")
-    st.markdown(
-        "<div style='color:#777;font-size:0.75rem;line-height:1.55'>"
-        "· 예측은 추정이며, 2026년 9~10월 평일 09~21시 1시간 단위 교통카드 자료(대전교통 빅데이터 플랫폼 tportal)로 만들었어요.<br>"
-        "· '앞차 간격이 길면 그만큼 붐빈다'는 원리를 실제 데이터로 검증하지는 못했어요.<br>"
-        "· 버스 정원(만차선 55명)은 제조사 사양 기준 추정이에요. 못 탈 확률 구간은 화면 표시용으로 정한 추정값이에요.<br>"
-        "· 몰림 주의는 N13 쪽 건물에서 끝나는 수업이 30개 이상인 시간대를 표시한 규칙이에요.<br>"
-        "· 노선 번호 색: 녹색은 확인된 노선(11번 외곽, 117·212번), 회색은 공식 자료로 확인 못 한 노선이에요.<br>"
-        "· 출처: 공공데이터포털(data.go.kr) 대전광역시 버스 도착정보·노선정보 API(도착정보는 45초마다 갱신), "
-        "대전교통정보센터 시내버스 시간표(2026.11.1.), 대전광역시 공영자전거(타슈) 위치 현황, OpenStreetMap 기여자(ODbL).</div>",
-        unsafe_allow_html=True)
+    html("<div class='n13-mu' style='text-align:center;margin-top:18px'>예측은 추정값이에요 · 45초마다 자동 갱신<br>"
+         "다른 목적지는 길찾기 앱을 이용하세요<br>"
+         "출처: 공공데이터포털 대전광역시 버스 도착정보·노선정보, 대전교통 빅데이터 플랫폼 교통카드, 대전교통정보센터 시간표, 타슈 위치 현황, OpenStreetMap</div>")
+
+
+def main():
+    st.set_page_config(page_title="N13 하교 버스", layout="centered")
+    html(CSS)
+    qp = st.query_params
+    demo = "demo" in qp
+    dq = qp.get("day") if demo and qp.get("day") in list(DAYS) else None
+    now = get_now(demo, qp)
+    html("<div class='n13-title'>N13 하교 버스</div>"
+         f"<div class='n13-sub'>삼성화재연수원 정류장(41730) · {now:%H:%M} {dq or DAYS[now.weekday()]}요일"
+         + (" · 예시 화면" if demo else "") + "</div>")
+    # 예시 모드에서 ?routes=102,104 를 붙이면 '특정 노선'으로 시작 (발표·캡처용)
+    pre = [int(x) for x in str(qp.get("routes", "")).split(",") if x.strip().isdigit() and int(x) in ALL_ROUTES] if demo else []
+    mode = st.radio("어떻게 가요?", MODES, horizontal=True, index=1 if pre else 0)
+    if mode == MODES[0]:
+        routes = SUBWAY_ROUTES
+        st.caption("현충원역(11·102·104·113·212번)·월드컵경기장역(117번) 등 지하철역을 지나는 6개 노선")
+    else:
+        routes = st.multiselect("노선", ALL_ROUTES, default=pre or [102], format_func=lambda r: f"{r}번",
+                                placeholder="노선을 골라 주세요")
+        if not routes:
+            html("<div class='n13-card n13-sm'>노선을 하나 이상 골라 주세요.</div>")
+            footer()
+            return
+    live_section(routes, demo, dq)
+    feedback_section(routes, demo, dq)
+    footer()
 
 
 try:
