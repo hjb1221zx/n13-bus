@@ -1,0 +1,14 @@
+[theme]
+base = "light"
+primaryColor = "#2f6db5"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+# 오류가 나도 화면에는 일반 안내만 보이고, 예외 내용·코드 위치는 보이지 않음
+showErrorDetails = "none"
