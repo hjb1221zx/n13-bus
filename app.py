@@ -56,6 +56,7 @@ ALL_ROUTES = [11, 102, 104, 113, 117, 212]
 SUBWAY_ROUTES = ALL_ROUTES   # 6개 모두 N13 다음에 지하철역 근처를 지남(analysis/subway_routes_check.csv)
 MODES = ["지하철 환승", "특정 노선"]
 DIRS = ["반석 방면", "판암 방면"]
+DIR_LABEL = {"반석 방면": "반석 방면 · :gray[월드컵경기장·노은·반석]", "판암 방면": "판암 방면 · :gray[유성온천·시청·대전역·판암]"}
 DRCT = {"반석 방면": 1, "판암 방면": 0}       # 열차시각표 drctType (fetch_metro.py: 데이터로 확인)
 STN_NAME = {101: "판암", 102: "신흥", 103: "대동", 104: "대전역", 105: "중앙로", 106: "중구청", 107: "서대전네거리",
             108: "오룡", 109: "용문", 110: "탄방", 111: "시청", 112: "정부청사", 113: "갈마", 114: "월평", 115: "갑천",
@@ -64,14 +65,17 @@ BUFFER = 1.5                 # 걷는 시간에 더하는 여유(분)
 # 대체 정류장: (이름, ARS, 걷는 분(추정), 노선, N13보다 먼저 오는 분(추정), 설명)
 PLACES = [("정문", "41690", 6.8, ALL_ROUTES, 1, "N13보다 덜 찬 상태로 와요"),
           ("수통골삼거리", "41670", 11.1, [11, 102, 104], 2, "정문 전 정류장이라 덜 찬 상태로 와요"),
-          ("덕명중·수통골입구", "45770", 10.7, [113, 117, 212], 2, "정문 전 정류장이라 덜 찬 상태로 와요"),
+          # 13차: 덕명중학교·수통골입구를 따로(도착 시각·걷는 시간이 다름). 걷기 = OSM 도보 길찾기(추정),
+          # N13보다 먼저 오는 분 = 정거장 수(3·2) × 약 1분(추정). 카드는 '덕명중학교·수통골입구' 하나로 묶어서 보여 줌
+          ("덕명중학교", "45830", 16.3, [113, 117, 212], 3, "덕명중학교·수통골입구"),
+          ("수통골입구", "45770", 10.7, [113, 117, 212], 2, "덕명중학교·수통골입구"),
           ("덕명네거리", "41400", 11.5, [48, 107, 300, 340], None, "현충원역 방면 · 대전 48·107번, 공주 300·340번")]
 # 시간표 버스의 출발지와 출발지→정류장 이동 시간(분, 추정)
 ORIGIN = {11: "수통골", 102: "수통골", 104: "수통골", 113: "학하동", 117: "학하동", 212: "빼울약수터", 107: "동학사",
-          300: "공주", 340: "공주"}   # 300 공주 산성동, 340 공주 신원사 출발
+          300: "공주", 340: "공주", 48: "두마면사무소"}   # 300 공주 산성동, 340 공주 신원사, 48 계룡 두마면사무소앞 출발
 T_DEP = {11: 4, 102: 4, 104: 4, 113: 12, 117: 12, 212: 66}
-T_DUK = {107: 27, 300: 65, 340: 90}   # 덕명네거리까지 (parse_timetable_alt.py, build_gongju_schedule.py)
-REALTIME_ONLY = {48}                  # 공식 시간표 없음 → 실시간(TAGO)에 잡힐 때만
+T_DUK = {107: 27, 300: 65, 340: 90, 48: 50}   # 덕명네거리까지 (parse_timetable_alt.py, build_gongju_schedule.py, build_gyeryong48.py)
+REALTIME_ONLY = {48}   # 예정 시각 파일(schedule_gyeryong.csv)이 없으면 실시간(TAGO)에 잡힐 때만
 # TAGO(국토교통부) 정류소 ID: 덕명네거리 현충원역 방면 (TAGO 정류소정보 getSttnNoList로 찾음, 11/22)
 TAGO = [("25", "DJB8002923"),         # 대전광역시/계룡시 → 48번
         ("34020", "GOB186011031")]    # 공주시 → 300·340번
@@ -91,11 +95,11 @@ def load_tables():
     T = pd.read_csv(tp) if tp.exists() else pd.DataFrame()
     R = pd.read_csv(HERE / "data" / "alt_stop_ratio.csv")
     ratio = {}
-    for rt, g in R.groupby("노선"):
+    for (rt, ars), g in R.groupby(["노선", "ARS"]):   # 13차: 정류장(ARS)별 — 덕명중학교·수통골입구 따로
         med = g["비율"].median()
         for _, x in g.iterrows():
             v = x["비율"] if x["비율"] == x["비율"] else med
-            ratio[(int(rt), int(x["시간대"]))] = min(float(v), 1.0)   # 1 넘는 칸(시간대 경계 효과)은 1로
+            ratio[(int(rt), str(int(ars)), int(x["시간대"]))] = min(float(v), 1.0)   # 1 넘는 칸(시간대 경계 효과)은 1로
     return P, S, T, ratio
 
 
@@ -103,7 +107,7 @@ def load_tables():
 def load_alt():
     """덕명네거리 시간표 예정: 107번(parse_timetable_alt.py) + 공주 300·340번(build_gongju_schedule.py). 48번은 시간표 없음"""
     out = []
-    for f in ("schedule_alt.csv", "schedule_gongju.csv"):
+    for f in ("schedule_alt.csv", "schedule_gongju.csv", "schedule_gyeryong.csv"):   # 48번: 계룡시 공식 시간표(14차)
         p = HERE / "data" / f
         if p.exists():
             out.append(pd.read_csv(p)[["일정", "노선", "정류장", "예정분"]])
@@ -497,6 +501,7 @@ CSS = """
 .n13-stamp{font-size:.82rem;color:#4b5563;margin:2px 0 6px}
 .n13-note{font-size:.82rem;color:#374151;background:#f4f5f7;border-radius:10px;padding:8px 12px;margin:8px 0 0}
 .n13-crowd{color:#b91c1c;font-weight:700}
+.n13-sit{font-size:.82rem;color:#374151;line-height:1.6;margin:6px 2px 0}
 .n13-warn{font-size:.82rem;color:#b91c1c;font-weight:600;line-height:1.6;margin-top:2px}
 .n13-legend{font-size:.78rem;color:#4b5563;line-height:1.6;margin:-4px 0 4px}
 .n13-chip{display:inline-block;border-radius:6px;padding:1px 8px;font-weight:700;font-size:.85rem;white-space:nowrap;line-height:1.5}
@@ -505,11 +510,16 @@ CSS = """
 .nw{white-space:nowrap}
 .n13-sub2{margin-top:4px}
 div[data-testid="stButtonGroup"] button{min-height:44px;min-width:64px}
-.st-key-mode div[data-testid="stButtonGroup"] > div,.st-key-dir div[data-testid="stButtonGroup"] > div{width:100%;display:flex}
-.st-key-mode div[data-testid="stButtonGroup"] button,.st-key-dir div[data-testid="stButtonGroup"] button{flex:1 1 0;font-size:.95rem}
+.st-key-mode div[data-testid="stButtonGroup"] > div{width:100%;display:flex}
+.st-key-mode div[data-testid="stButtonGroup"] button{flex:1 1 0;font-size:.95rem}
 div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"],
 div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"]{background:#eaf2fd!important;border-color:#7aa7e0!important;color:#1e4f9a!important}
 div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"] p{color:#1e4f9a!important}
+span[data-tag][aria-label="102번"],span[data-tag][aria-label="104번"],span[data-tag][aria-label="113번"]{background:#1e3a8a!important;color:#fff!important}
+span[data-tag][aria-label="11번"],span[data-tag][aria-label="117번"],span[data-tag][aria-label="212번"]{background:#14532d!important;color:#fff!important}
+span[data-tag] button{color:#fff!important}
+.st-key-dir div[data-testid="stButtonGroup"] button{min-height:44px;min-width:0;padding:4px 12px}
+.st-key-dir div[data-testid="stButtonGroup"] button p{font-size:.85rem}
 [data-testid="stExpander"] details{border:1px solid #e3e6ea;border-radius:10px}
 [data-testid="stExpander"] summary{min-height:44px;box-sizing:border-box;display:flex;align-items:center}
 [data-testid="stExpander"] summary p{font-size:.95rem;color:#111827}
@@ -741,12 +751,12 @@ def metro_link(rt, cur, now, demo, direction, weekend):
 
 
 # ---------------- 대체경로 ----------------
-def _alt_board(P, S, rt, e, offset, now, day, last_pass, ratio, name, kind, hw=None):
+def _alt_board(P, S, rt, e, offset, now, day, last_pass, ratio, name, kind, hw=None, ars=""):
     """대체 정류장 버스의 탑승 가능성(그 정류장을 떠날 때 인원)"""
     b = predict_bus(P, S, rt, e + offset, now, day, last_pass.get(rt) if kind == "실시간" else None, hw=hw)
     if not b["예측"]:
         return None, None
-    f = 1.0 if name == "정문" else ratio.get((rt, b["도착dt"].hour), 1.0)
+    f = 1.0 if name == "정문" else ratio.get((rt, ars, b["도착dt"].hour), 1.0)
     return BOARD[stage(b["보통_도착"] * f)], BOARD[stage(b["붐빔_도착"] * f)]
 
 
@@ -756,8 +766,9 @@ def place_options(routes, demo, S, A, now, day, P, ratio, last_pass, in_service,
     이 함수가 불릴 때만 대체 정류장 API를 부름"""
     m = now.hour * 60 + now.minute
     opts, failed = [], False
-    for name, ars, walk, prts, offset, _note in PLACES:
-        base = {"장소": name, "걷기": walk, "버스": None, "오프셋": offset}
+    for name, ars, walk, prts, offset, group in PLACES:
+        base = {"장소": name, "걷기": walk, "버스": None, "오프셋": offset,
+                "묶음": group if group == "덕명중학교·수통골입구" else ""}
         if offset is None:
             if not subway:
                 continue
@@ -787,7 +798,8 @@ def place_options(routes, demo, S, A, now, day, P, ratio, last_pass, in_service,
             if not ok:
                 no_info.append(rt)
                 if offset is None:   # 덕명네거리 카드는 노선마다 한 줄(11/22 11차)
-                    why1 = "실시간 정보 없음" if rt in REALTIME_ONLY else "오늘 남은 버스 없음"
+                    why1 = ("실시간 정보 없음" if rt in REALTIME_ONLY and A[A["노선"] == rt].empty
+                            else "오늘 남은 버스 없음")
                     lines.append((10 ** 6, f"{num(rt)}<span class='n13-mu'>{why1}</span>"))
                 continue
             e, kind = ok[0]
@@ -799,7 +811,12 @@ def place_options(routes, demo, S, A, now, day, P, ratio, last_pass, in_service,
                 continue
             lv = lvb = None
             if offset is not None and in_service:
-                lv, lvb = _alt_board(P, S, rt, e, offset, now, day, last_pass, ratio, name, kind)
+                # 앞차 간격(12차 고침): 그 버스 바로 앞 버스와의 간격. N13 카드의 '다음 버스'(e2−e1)와 같은 방식이라
+                # 같은 버스면 정문 인원 = N13 도착 인원으로 맞음. 맨 앞 버스만 실시간 통과 기록(last_pass) 사용
+                i0 = cands.index((e, kind))
+                hw = None if i0 == 0 else e - cands[i0 - 1][0]
+                lv, lvb = _alt_board(P, S, rt, e, offset, now, day, last_pass if i0 == 0 else {}, ratio, name, kind,
+                                     hw=hw if hw and hw > 0 else None, ars=ars)
             cand = {**base, "버스": rt, "탈분": e, "종류": kind, "탑승": lv, "붐빔탑승": lvb, "이동": tr}
             if best is None or rank_key(cand) < rank_key(best):
                 best = cand
@@ -840,9 +857,52 @@ def option_card(o, now):
         body = f"<div class='n13-mu n13-sub2'>{o['상태']}</div>"
     else:
         rt = o["버스"]
-        c = f" {chip(o['탑승'], True)}" if o.get("탑승") else ""
-        body = f"<div class='n13-pl2'>{num(rt)}{eta_text(rt, o['탈분'], o['종류'], now, o.get('이동'), c)}</div>"
+        body = f"<div class='n13-pl2'>{num(rt)}{eta_text(rt, o['탈분'], o['종류'], now, o.get('이동'))}</div>"
+        if o.get("탑승"):   # 칩에 장소를 붙임: '정문에서 [탑승 보통]' (12차)
+            body += f"<div class='n13-sub2'>{place_board(o['장소'], o['탑승'], label_n13=True)}</div>"
     html(card(head + body))
+
+
+def group_card(members, now):
+    """'덕명중학교·수통골입구' 한 카드 안에 정류장별로: '덕명중학교 · 걸어서 약 16분' / '113 약 17분 뒤 도착 [탑승 쉬움]' (13차)"""
+    body = ""
+    for o in members:
+        body += (f"<div class='n13-sub2'><span class='n13-place' style='font-weight:500'>{o['장소']}</span> "
+                 f"<span class='n13-mu'>· 걸어서 약 {round(o['걷기'])}분</span></div>")
+        if o.get("버스") is None:
+            body += f"<div class='n13-mu'>{o['상태']}</div>"
+        else:
+            rt = o["버스"]
+            c = f" {chip(o['탑승'], True)}" if o.get("탑승") else ""
+            body += f"<div class='n13-pl2' style='margin-top:0'>{num(rt)}{eta_text(rt, o['탈분'], o['종류'], now, o.get('이동'), c)}</div>"
+    html(card(f"<span class='n13-place'>{members[0]['묶음']}</span>" + body))
+
+
+def dedupe(lst):
+    """묶음(덕명중학교·수통골입구)은 처음 나온 것 하나만 남김 — 순서는 그대로"""
+    seen, out = set(), []
+    for o in lst:
+        g = o.get("묶음")
+        if g and g in seen:
+            continue
+        if g:
+            seen.add(g)
+        out.append(o)
+    return out
+
+
+def render_options(lst, now, everything):
+    """장소 카드 그리기. '묶음'이 있는 정류장(덕명중학교·수통골입구)은 처음 나오는 자리에 한 카드로(타는 시각 빠른 순)"""
+    done = set()
+    for o in lst:
+        g = o.get("묶음")
+        if not g:
+            option_card(o, now)
+        elif g not in done:
+            done.add(g)
+            mem = [x for x in everything if x.get("묶음") == g]
+            mem.sort(key=lambda x: (x.get("버스") is None, x.get("탈분", 10 ** 4)))
+            group_card(mem, now)
 
 
 def get_now(demo, qp):
@@ -888,12 +948,79 @@ def hero_card(lv, h1, lines):
     html(f"<div class='n13-hero'{style}><div class='h1'>{h1}</div>{''.join(lines)}</div>")
 
 
-def hero_detail(rt, e, kind, now, tr, lv, lvb, link):
-    out = [f"<div class='h2'>{eta_text(rt, e, kind, now, tr)} · {board(lv)}</div>", crowded_warn(lv, lvb),
-           f"<div class='n13-mu'>못 탈 확률 {PROB[lv]} (추정)</div>"]
-    if link:
-        out.append(f"<div class='n13-mu'>{link_long(link)}</div>")
+def rnum(rt):
+    """결론 문장 속 버스 번호(노선 색)"""
+    return f"<span style='color:{rcolor(rt)}'>{rt}번</span>"
+
+
+def place_board(place, lv, label_n13=False):
+    """다른 장소면 '정문에서 [탑승 보통] 서서 가요', N13이면 '[탑승 쉬움] 앉아서 가요'('어디서 탈까요?'는 N13에도 붙임)"""
+    pre = "" if place == "N13" and not label_n13 else f"{place}에서 "
+    if lv not in BIDX:
+        return f"{pre}혼잡 예측은 없어요"
+    return f"<span class='nw'>{pre}{chip(lv)}<span class='n13-ph'>{SHORT[lv]}</span></span>"
+
+
+def arr_text(e, kind, end=" 도착"):
+    return (f"{e}분 뒤{end}" if e > 1 else f"곧{end}") if kind == "실시간" else f"약 {max(e, 1)}분 뒤{end}"
+
+
+def hero_lines(place, walk, rt, e, kind, lv, link, now):
+    """결론 카드 2~4줄: 걷기·도착 / 칩 / (지하철) '현충원역 16:51 도착 (버스로 약 5분) → 16:57 판암행 · 환승 여유 4분'"""
+    s2 = f"{rnum(rt)}은 {place}에 {arr_text(e, kind)}"
+    if place != "N13":
+        s2 = f"<span class='nw'>{place}까지 걸어서 약 {round(walk)}분</span> · <span class='nw'>{s2}</span>"
+    out = [f"<div class='h2'>{s2}</div>", f"<div class='h2'>{place_board(place, lv)}</div>"]
+    if link and link["열차"] is not None:
+        ride = link["도착"] - (now.hour * 60 + now.minute + e)   # 타는 정류장 → 역 버스 이동 분 (13차)
+        t1 = f"{link['역']} {hm(link['도착'])} 도착 (버스로 {'약 ' if link['추정'] else ''}{max(ride, 1)}분)"
+        t = f"{hm(link['열차'])} {link['종착']}행 · {spare(link)}"
+        if link["아슬"] and link["다음"]:
+            t += f" (놓치면 {hm(link['다음'])})"
+        out.append(f"<div class='h2'><span class='nw'>{t1}</span> <span class='nw'>→ {t}</span></div>")
+    elif link and link["없음"]:
+        out.append("<div class='h2'>오늘 남은 열차 없음</div>")
     return out
+
+
+def sit_line(rec, ranked, pred):
+    """결론 카드 아래 한 줄(13차): 추천한 방법이 '탑승 쉬움'이 아니고, 앉아서 갈 수 있는(탑승 쉬움) 다른 방법이
+    추천보다 15분 넘게 늦지 않게 타면 '앉아서 가려면: 수통골삼거리에서 102번 · 걸어서 약 11분 · 약 19분 뒤'"""
+    if rec.get("탑승") == "높음":
+        return
+    same = (rec["장소"], rec["버스"], rec["탈분"])
+    cand = [{"장소": "N13", "버스": b["노선"], "탈분": b["도착분"], "종류": b["종류"], "걷기": 0}
+            for b in pred if b["보통_탑승"] == "높음"]
+    cand += [o for o in ranked if o.get("탑승") == "높음" and o["장소"] != "N13"]
+    cand = [o for o in cand if (o["장소"], o["버스"], o["탈분"]) != same and o["탈분"] - rec["탈분"] <= 15]
+    if not cand:
+        return
+    o = min(cand, key=lambda x: x["탈분"])
+    walk = f" · 걸어서 약 {round(o['걷기'])}분" if o["장소"] != "N13" else ""
+    html(f"<div class='n13-sit'><b>앉아서 가려면:</b> <span class='nw'>{o['장소']}에서 {rnum(o['버스'])}</span>"
+         f"<span class='nw'>{walk}</span> <span class='nw'>· {arr_text(o['탈분'], o['종류'], '')}</span></div>")
+
+
+def together_note(cards):
+    """같은 지하철역으로 가는 서로 다른 노선 버스가 N13에 3분 안에 같이 오면 안내 한 줄(13차).
+    노선별 예측은 그대로 — 같이 올 때 사람이 나눠 타는 효과는 예측에 반영하지 못함(REPORT 한계)"""
+    _, _, L = load_metro()
+    if L is None:
+        return
+    buses = []
+    for x in cards:   # 곧 오는(15분 안) 노선별 이번 버스끼리만 — 너무 자주 뜨지 않게
+        b = x["c"]
+        if b is not None and b["노선"] in L.index and b["도착분"] <= 15:
+            buses.append((b["도착분"], b["노선"], L.loc[b["노선"], "역"]))
+    for stn in sorted({s for _, _, s in buses}):
+        bs = sorted((e, r) for e, r, s in buses if s == stn)
+        for i, (e0, _) in enumerate(bs):
+            grp = sorted({r for e, r in bs[i:] if e - e0 <= 3})
+            if len(grp) >= 2:
+                # '번'으로 끝나서 조사는 늘 '과'·'이'
+                names = "과 ".join(f"{r}번" for r in grp) if len(grp) == 2 else "·".join(f"{r}번" for r in grp)
+                html(f"<div class='n13-note'><b>{names}이 같이 와요.</b> 사람이 나눠 탈 수 있어요</div>")
+                return
 
 
 @st.fragment(run_every=CACHE_SEC)
@@ -973,59 +1100,61 @@ def _live_section(routes, demo, dq, direction):
     if in_service and risky:   # N13이 위험할 때만 대체 정류장 조회
         alts = all_alternatives(routes, demo, S, A, now, day, P, ratio, last_pass, in_service, T, subway, first)
 
+    # 결론 카드(11/22 12차): 4줄 — 무엇을 추천 / 걷기·도착 / [장소에서] 칩 / (지하철) 열차·환승 여유
+    rec = None
     if not in_service:
         hero_card(None, "이 서비스는 09~21시만 예측해요", ["<div class='h2'>지금은 버스 도착 시각만 보여드려요.</div>"])
     elif first is None:
         hero_card(None, "곧 오는 버스가 없어요", ["<div class='h2'>아래에서 다음 버스와 다른 방법을 확인하세요.</div>"])
     elif not risky:
         # 규칙(그대로): N13 다음 버스가 쉬움·보통이면 N13에서 타기. 지하철 환승이면 그중 가장 빠른 열차를 타는 버스
-        pick, reason = first, "가장 먼저 오고 " + CAN[first["보통_탑승"]]
+        pick = first
         if subway:
             okc = [x for x in cards if x["c"] and x["c"]["예측"] and x["c"]["보통_탑승"] in CAN
                    and x["연계"] and x["연계"]["키"] is not None]
             if okc:
-                bx = min(okc, key=lambda x: (x["연계"]["키"], x["c"]["도착분"]))
-                if bx["c"] is not first:
-                    pick, reason = bx["c"], "가장 빠른 열차를 탈 수 있고 " + CAN[bx["c"]["보통_탑승"]]
+                pick = min(okc, key=lambda x: (x["연계"]["키"], x["c"]["도착분"]))["c"]
         rt = pick["노선"]
         link = next((x["연계"] for x in cards if x["c"] is pick), None)
-        extra = []
-        if link and link["키"] is not None:
-            # 현충원역 11:42 열차 = 월드컵경기장역 11:44 열차처럼, 다른 역에서 타는 같은 열차면 밝혀 줌(11/22 10차)
-            same = [x["연계"] for x in cards if x["연계"] and x["연계"]["키"] == link["키"] and x["연계"]["역"] != link["역"]]
-            if same:
-                extra = [f"<div class='n13-mu'><span class='nw'>{same[0]['역']} {hm(same[0]['열차'])}에 출발하는 열차와</span> "
-                         f"<span class='nw'>같은 열차예요</span></div>"]
-        hero_card(pick["보통_탑승"], f"N13에서 <span style='color:{rcolor(rt)}'>{rt}번</span>을 타세요",
-                  [f"<div class='h2'>{reason}</div>"] +
-                  hero_detail(rt, pick["도착분"], pick["종류"], now, travel_min(rt, 0), pick["보통_탑승"], pick["붐빔_탑승"], link)
-                  + extra)
-    elif risky:
-        # 대안: N13 뒤 버스 중 탈 만한 것 + 대체 장소 중 탈 만한 것 → 타는 시각이 빠른 순(서서 갈 수 있는 게 먼저 오면 그것)
-        ranked, _, slow, _ = alts
-        cand = [{"장소": "N13", "버스": b["노선"], "탈분": b["도착분"], "탑승": b["보통_탑승"], "붐빔탑승": b["붐빔_탑승"],
-                 "종류": b["종류"], "걷기": 0, "이동": travel_min(b["노선"], 0), "오프셋": 0} for b in pred if b["보통_탑승"] in CAN]
-        cand += [o for o in ranked if o.get("탑승") in CAN and o["장소"] != "N13"]
+        hero_card(pick["보통_탑승"], f"N13에서 {rnum(rt)}을 추천해요",
+                  hero_lines("N13", 0, rt, pick["도착분"], pick["종류"], pick["보통_탑승"], link, now))
+        rec = {"장소": "N13", "버스": rt, "탈분": pick["도착분"], "탑승": pick["보통_탑승"]}
+        if pick["보통_탑승"] != "높음":   # '앉아서 가려면' 후보를 찾으려고 다른 장소도 조회(13차)
+            alts = all_alternatives(routes, demo, S, A, now, day, P, ratio, last_pass, in_service, T, subway, first)
+    else:
+        # 대안: N13 뒤 버스 중 탈 만한 것 + 다른 장소 중 탈 만한 것 → 타는 시각이 빠른 순(서서 갈 수 있는 게 먼저 오면 그것)
+        ranked = alts[0]
+        n13_ok = [{"장소": "N13", "버스": b["노선"], "탈분": b["도착분"], "탑승": b["보통_탑승"], "종류": b["종류"],
+                   "걷기": 0, "오프셋": 0} for b in pred if b["보통_탑승"] in CAN]
+        cand = n13_ok + [o for o in ranked if o.get("탑승") in CAN and o["장소"] != "N13"]
         cand.sort(key=lambda o: (o["탈분"], BIDX[o["탑승"]]))
-        tail = ["<div class='n13-mu'>버스가 모두 20분 이상 걸려요. 급하면 택시</div>"] if slow else []
+        if not cand:   # 예측이 있는 곳이 모두 어려우면, 혼잡 예측이 없는 방법(덕명네거리 48·107·300번 등) 중 가장 빠른 것
+            cand = [o for o in ranked if o["장소"] != "N13" and o.get("탑승") is None]
         if cand:
             o = cand[0]
             rt = o["버스"]
+            # 정류장이 아니라 버스가 붐비는 것 → 어떤 버스가 N13에서 타기 어려운지로 말함(12차)
+            one_route = len({b["노선"] for b in pred}) == 1
+            lead = (f"{rnum(first['노선'])}은 N13에서 타기 어려워요." if (n13_ok or one_route)
+                    else "N13에 오는 버스가 모두 타기 어려워요.")
             if o["장소"] == "N13":
-                reason = f"앞 버스는 혼잡하고, 이 버스는 {CAN[o['탑승']]}"
-                h1 = f"N13에서 <span style='color:{rcolor(rt)}'>{rt}번</span>을 타세요"
+                what = f"N13에서 {'다음 ' if rt == first['노선'] else ''}{rnum(rt)}을 추천해요"
+            elif rt == first["노선"]:
+                what = f"{o['장소']}에서 타는 걸 추천해요"
             else:
-                reason = f"N13은 혼잡해요. 여기서 타면 {CAN[o['탑승']]}"
-                h1 = (f"{o['장소']}에서 <span style='color:{rcolor(rt)}'>{rt}번</span>을 타세요 "
-                      f"<span class='wk'>· 걸어서 약 {round(o['걷기'])}분</span>")
+                what = f"{o['장소']}에서 {rnum(rt)}을 추천해요"
             link = None
             if subway and o.get("오프셋") is not None:
                 link = metro_link(rt, {"도착분": o["탈분"] + o["오프셋"], "차량": ""}, now, demo, direction, weekend)
-            hero_card(o["탑승"], h1, [f"<div class='h2'>{reason}</div>"] +
-                      hero_detail(rt, o["탈분"], o["종류"], now, o.get("이동"), o["탑승"], o.get("붐빔탑승"), link) + tail)
+            hero_card(o.get("탑승"), f"{lead} {what}",
+                      hero_lines(o["장소"], o["걷기"], rt, o["탈분"], o["종류"], o.get("탑승"), link, now))
+            rec = o
         else:
-            hero_card(first["보통_탑승"], "N13 버스가 혼잡해요",
-                      ["<div class='h2'>곧 탈 만한 다른 방법이 없어요. 아래 목록을 확인하세요.</div>"] + tail)
+            hero_card(first["보통_탑승"], "N13에 오는 버스가 모두 타기 어려워요",
+                      ["<div class='h2'>아래 '어디서 탈까요?'에서 다른 방법을 확인하세요.</div>"])
+    if in_service and first is not None and rec is not None and alts is not None:
+        sit_line(rec, alts[0], pred)
+    together_note(cards)
     if weekend:
         html("<div class='n13-note'>주말은 평일(금요일) 데이터로 추정한 값이에요.</div>")
     cn = "" if weekend or not in_service else crowd_note(P, day, now)   # 주말엔 수업이 없어 안 보임
@@ -1048,14 +1177,16 @@ def _live_section(routes, demo, dq, direction):
         ranked, rest, slow, failed = alts
         if failed:
             html(f"<div class='n13-note'>{PART_FAIL}</div>")
-        show = ranked[:2] + [TAXI] if slow else ranked[:3]
-        more = ranked[(2 if slow else 3):] + rest + ([] if slow else [TAXI])
-        for o in show:
-            option_card(o, now)
+        every = ranked + rest
+        units = dedupe(every)   # 덕명중학교·수통골입구는 한 카드
+        r_units = [o for o in units if o.get("버스") is not None]
+        o_units = [o for o in units if o.get("버스") is None]
+        show = r_units[:2] + [TAXI] if slow else r_units[:3]
+        more = r_units[(2 if slow else 3):] + o_units + ([] if slow else [TAXI])
+        render_options(show, now, every)
         if more:
             with st.expander(f"다른 장소 더 보기 ({len(more)}개)"):
-                for o in more:
-                    option_card(o, now)
+                render_options(more, now, every)
     else:
         with st.expander("장소별로 보기", key="more_alt", on_change="rerun"):
             if ss.get("more_alt"):
@@ -1063,8 +1194,7 @@ def _live_section(routes, demo, dq, direction):
                                                               in_service, T, subway, first)
                 if failed:
                     html(f"<div class='n13-note'>{PART_FAIL}</div>")
-                for o in ranked + rest + [TAXI]:
-                    option_card(o, now)
+                render_options(dedupe(ranked + rest) + [TAXI], now, ranked + rest)
 
 
 def feedback_section(routes, demo, dq):
@@ -1132,6 +1262,21 @@ KEEPALIVE = """
     try { P.sessionStorage.setItem('n13_reload', why + ' ' + new Date().toTimeString().slice(0, 8)); } catch (e) {}
     P.location.reload();
   }
+  // 지하철 방향 기억(13차): 주소에 dir·mode·demo가 없이 다시 열면, 이 브라우저에 저장한 마지막 방향(판암)으로 열기.
+  // 저장 값은 'pan'/'ban' 한 글자뿐(개인정보 아님). 저장소를 못 쓰는 환경이면 그냥 넘어감
+  try {
+    const q = new URLSearchParams(P.location.search);
+    if (!q.has('dir') && !q.has('mode') && !q.has('demo') && P.localStorage.getItem('n13_dir') === 'pan') {
+      // iframe 안에서는 다른 주소로 이동이 막혀서, 주소만 바꾼 뒤 새로고침
+      q.set('dir', 'pan'); P.history.replaceState(null, '', P.location.pathname + '?' + q.toString()); P.location.reload();
+    }
+  } catch (e) {}
+  setInterval(function(){
+    try {
+      const q = new URLSearchParams(P.location.search);
+      if (q.get('mode') !== 'route' && !q.has('demo')) P.localStorage.setItem('n13_dir', q.get('dir') === 'pan' ? 'pan' : 'ban');
+    } catch (e) {}
+  }, 3000);
   P.document.addEventListener('visibilitychange', function(){
     if (P.document.hidden) { hiddenAt = Date.now(); }
     else if (hiddenAt && Date.now() - hiddenAt > 90000) { reload('hidden ' + Math.round((Date.now() - hiddenAt) / 1000) + 's'); }
@@ -1161,15 +1306,15 @@ def _qp_set(name, value):
 
 
 def main():
-    st.set_page_config(page_title="N13 하교 버스", layout="centered")
+    st.set_page_config(page_title="한밭대학교 N13 하교 버스", layout="centered")
     html(CSS)
     components.html(KEEPALIVE, height=0)
     qp = st.query_params
     demo = "demo" in qp
     dq = qp.get("day") if demo and qp.get("day") in list(DAYS) else None
     now = get_now(demo, qp)
-    html("<div class='n13-title'>N13 하교 버스</div>"
-         f"<div class='n13-sub'>삼성화재연수원 정류장(41730) · {now:%H:%M} {dq or DAYS[now.weekday()]}요일</div>")
+    html("<div class='n13-title'>한밭대학교 N13 하교 버스</div>"
+         f"<div class='n13-sub'>삼성화재연수원 정류장 · {now:%H:%M} {dq or DAYS[now.weekday()]}요일 기준</div>")
     ss = st.session_state
     pre = [int(x) for x in str(qp.get("routes", "")).split(",") if x.strip().isdigit() and int(x) in ALL_ROUTES]
     # 처음 열 때만 주소의 값으로 선택을 채움(새로고침해도 유지)
@@ -1181,7 +1326,9 @@ def main():
     direction = None
     if mode != MODES[1]:
         routes = SUBWAY_ROUTES
-        direction = st.segmented_control("열차 방향", DIRS, required=True, key="dir", width="stretch")
+        # 13차: 큰 토글 대신 작은 칩. 숨겨졌다 다시 보여도 값 유지(persist_state), 주소(dir)·브라우저 저장(지킴이 스크립트)으로 다시 열어도 그대로
+        direction = st.pills("지하철 방향", DIRS, required=True, key="dir", format_func=lambda d: DIR_LABEL[d],
+                             persist_state="session") or DIRS[0]
         _qp_set("mode", None)
         _qp_set("dir", "pan" if direction == DIRS[1] else None)
         _qp_set("dest", None)
@@ -1193,7 +1340,6 @@ def main():
                                 placeholder="노선을 골라 주세요")
         _qp_set("mode", "route")
         _qp_set("routes", ",".join(map(str, routes)))
-        _qp_set("dir", None)
         _qp_set("dest", None)
         if not routes:
             html("<div class='n13-mu'>노선을 하나 이상 골라 주세요.</div>")
