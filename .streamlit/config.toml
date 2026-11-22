@@ -1,6 +1,7 @@
 [theme]
 base = "light"
-primaryColor = "#2f6db5"
+# 선택된 토글은 연한 파랑 배경·테두리(11/22 10차, 기본 강조색 + app.py CSS). 9차의 검정 강조색은 되돌림
+primaryColor = "#1e4f9a"
 
 [server]
 headless = true
