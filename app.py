@@ -504,6 +504,8 @@ def on_answer(bid, bus, route):
 CSS = """
 <style>
 .block-container{padding-top:3rem;padding-bottom:2rem;max-width:560px}
+/* 한글이 글자 중간('보여드려/요.')에서 끊기지 않게 낱말(띄어쓰기) 단위로만 줄바꿈. 너무 긴 낱말만 예외로 자름 */
+.block-container,.block-container p,.block-container span,.block-container div,.block-container label{word-break:keep-all;overflow-wrap:break-word}
 [data-testid="stHeaderActionElements"],.stMarkdown h1 a,.stMarkdown h2 a,.stMarkdown h3 a{display:none!important}
 .n13-title{text-align:center;font-size:1.4rem;font-weight:700;color:#111827;margin:0;line-height:1.3}
 .n13-sub{text-align:center;font-size:.82rem;color:#4b5563;margin:2px 0 12px}
@@ -665,8 +667,7 @@ def route_card(rt, cur, nxt, now, status="", link=None):
     body = f"<div class='n13-main'>{num(rt)}{eta_text(rt, cur['도착분'], cur['종류'], now, tr)}</div>"
     if cur["예측"]:
         body += f"<div class='n13-sub2'>{board(cur['보통_탑승'])}</div>" + crowded_warn(cur["보통_탑승"], cur["붐빔_탑승"])
-    else:
-        body += "<div class='n13-mu'>예측은 평일 09~21시만 해요</div>"
+    # 예측이 없을 때(주말·밤)는 카드마다 같은 말을 반복하지 않음 — 결론 카드가 한 번 알려 줌
     if link:
         body += f"<div class='n13-mu n13-sub2'>{link_short(link)}</div>"
     if nxt is not None:
@@ -955,7 +956,8 @@ def all_alternatives(routes, demo, S, A, now, day, P, ratio, last_pass, in_servi
     if subway:   # 타슈는 현충원역까지 가는 방법이라 지하철 환승일 때만
         t = tashu_info(T)
         rest.append({"장소": "타슈", "걷기": t["걷기"] if t else 0, "버스": None,
-                     "상태": f"{t['이름']} 대여소 → 현충원역 자전거 약 {t['자전거']}분 (추정)" if t else "근처 대여소 정보 없음"})
+                     "상태": (f"<span class='nw'>{t['이름']} 대여소</span> → "
+                            f"<span class='nw'>현충원역 자전거 약 {t['자전거']}분 (추정)</span>") if t else "근처 대여소 정보 없음"})
     slow = not any(o["탈분"] < 20 for o in ranked)
     return ranked, rest, slow, failed
 
@@ -1129,7 +1131,7 @@ def _live_section(routes, demo, dq, direction):
     # 결론 카드(11/22 12차): 4줄 — 무엇을 추천 / 걷기·도착 / [장소에서] 칩 / (지하철) 열차·환승 여유
     rec = None
     if not in_service:
-        hero_card(None, "주말에는 예측하지 않아요" if weekend else "이 서비스는 09~21시만 예측해요",
+        hero_card(None, "주말에는 예측하지 않아요" if weekend else "이 서비스는 평일 09~21시만 예측해요",
                   ["<div class='h2'>평일 09~21시에만 탑승 가능성을 알려 드려요. 지금은 버스 도착 시각만 보여드려요.</div>"
                    if weekend else "<div class='h2'>지금은 버스 도착 시각만 보여드려요.</div>"])
     elif first is None:
@@ -1371,7 +1373,8 @@ def main():
             html("<div class='n13-mu'>노선을 하나 이상 골라 주세요.</div>")
             footer()
             return
-    html(f"<div class='n13-legend'>{LEGEND}</div>")   # 범례: 선택 토글 바로 아래(11/22 11차)
+    if now.hour in SERVICE_HOURS and not day_info(now, dq)[2]:   # 범례는 예측이 나올 때(평일 09~21시)만
+        html(f"<div class='n13-legend'>{LEGEND}</div>")   # 범례: 선택 토글 바로 아래(11/22 11차)
     live_section(routes, demo, dq, direction)
     feedback_section(routes, demo, dq)
     footer()
