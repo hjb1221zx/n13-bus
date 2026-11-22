@@ -103,14 +103,35 @@ def load_tables():
     return P, S, T, ratio
 
 
+# 48번 계룡시 공식 시간표(2026-10-13 시행, https://gyeryong.go.kr/kr/html/sub05/05040501.html) 두마면사무소앞 출발.
+# data/schedule_gyeryong.csv(build_gyeryong48.py)가 없을 때(배포 저장소에 안 올린 경우)도 쓰도록 app.py에 같은 값을 넣어 둠(14차 보완)
+G48 = {"평일": "06:00 06:35 07:10 07:35 08:00 08:30 09:20 10:10 10:50 11:20 11:50 12:30 13:10 14:00 14:40 15:10 15:40 "
+               "16:20 17:00 17:50 18:30 19:00 19:40 20:10 20:50 21:20 21:50 22:20",
+       "토일": "06:00 06:35 07:10 07:35 08:10 09:10 10:10 10:50 11:30 12:10 13:00 14:00 14:40 15:20 16:00 16:50 17:50 "
+               "18:30 19:10 19:50 20:40 21:30 22:20"}
+
+
+def g48_rows():
+    rows = []
+    for col, times in G48.items():
+        for t in times.split():
+            h, m = map(int, t.split(":"))
+            for kind in (["평일"] if col == "평일" else ["토요일", "휴일"]):
+                rows.append({"일정": kind, "노선": 48, "정류장": "덕명네거리", "예정분": h * 60 + m + T_DUK[48]})
+    return pd.DataFrame(rows)
+
+
 @st.cache_data
 def load_alt():
-    """덕명네거리 시간표 예정: 107번(parse_timetable_alt.py) + 공주 300·340번(build_gongju_schedule.py). 48번은 시간표 없음"""
+    """덕명네거리 예정 시각: 107번(parse_timetable_alt.py) + 공주 300·340번(build_gongju_schedule.py) + 계룡 48번(build_gyeryong48.py)"""
     out = []
-    for f in ("schedule_alt.csv", "schedule_gongju.csv", "schedule_gyeryong.csv"):   # 48번: 계룡시 공식 시간표(14차)
+    for f in ("schedule_alt.csv", "schedule_gongju.csv", "schedule_gyeryong.csv"):
         p = HERE / "data" / f
         if p.exists():
             out.append(pd.read_csv(p)[["일정", "노선", "정류장", "예정분"]])
+    have48 = any((d["노선"] == 48).any() for d in out)
+    if not have48:          # 48번 파일이 없으면 app.py 안의 같은 시간표로
+        out.append(g48_rows())
     return pd.concat(out) if out else pd.DataFrame(columns=["일정", "노선", "정류장", "예정분"])
 
 
@@ -645,7 +666,7 @@ def route_card(rt, cur, nxt, now, status="", link=None):
     if cur["예측"]:
         body += f"<div class='n13-sub2'>{board(cur['보통_탑승'])}</div>" + crowded_warn(cur["보통_탑승"], cur["붐빔_탑승"])
     else:
-        body += "<div class='n13-mu'>지원 시간(09~21시) 밖이라 예측하지 않아요</div>"
+        body += "<div class='n13-mu'>예측은 평일 09~21시만 해요</div>"
     if link:
         body += f"<div class='n13-mu n13-sub2'>{link_short(link)}</div>"
     if nxt is not None:
@@ -1041,7 +1062,8 @@ def _live_section(routes, demo, dq, direction):
     S = S_all[S_all["일정"] == kind]
     A = load_alt()
     A = A[A["일정"] == kind]
-    in_service = now.hour in SERVICE_HOURS
+    # 예측은 평일 09~21시만. 주말은 21시 이후처럼 도착 시각만(11/22 사용자 지시, 금요일 값으로 추정하던 것 중단)
+    in_service = now.hour in SERVICE_HOURS and not weekend
     subway = direction is not None
     stamp = kst_now()
     # 화면 글자는 예시 화면이면 예시 시각, 갱신 지킴이는 data 속성(실제 시각)을 봄
@@ -1078,6 +1100,8 @@ def _live_section(routes, demo, dq, direction):
             continue
         c = predict_bus(P, S, rt, e1, now, day, last_pass.get(rt) if k1 == "실시간" else None)
         c["종류"] = k1
+        if not in_service:
+            c["예측"] = False
         car = [r["차량"] for r in raw if r["노선"] == rt and r["도착분"] == e1]
         c["차량"] = car[0] if car and k1 == "실시간" else ""
         n = None
@@ -1085,6 +1109,8 @@ def _live_section(routes, demo, dq, direction):
             e2, k2 = cands[1]
             n = predict_bus(P, S, rt, e2, now, day, hw=e2 - e1)
             n["종류"] = k2
+            if not in_service:
+                n["예측"] = False
         pred += [x for x in (c, n) if x is not None and x["예측"]]
         link = metro_link(rt, c, now, demo, direction, weekend) if subway else None
         key = link["키"] if link and link["키"] is not None else now.hour * 60 + now.minute + e1 + 1000
@@ -1103,7 +1129,9 @@ def _live_section(routes, demo, dq, direction):
     # 결론 카드(11/22 12차): 4줄 — 무엇을 추천 / 걷기·도착 / [장소에서] 칩 / (지하철) 열차·환승 여유
     rec = None
     if not in_service:
-        hero_card(None, "이 서비스는 09~21시만 예측해요", ["<div class='h2'>지금은 버스 도착 시각만 보여드려요.</div>"])
+        hero_card(None, "주말에는 예측하지 않아요" if weekend else "이 서비스는 09~21시만 예측해요",
+                  ["<div class='h2'>평일 09~21시에만 탑승 가능성을 알려 드려요. 지금은 버스 도착 시각만 보여드려요.</div>"
+                   if weekend else "<div class='h2'>지금은 버스 도착 시각만 보여드려요.</div>"])
     elif first is None:
         hero_card(None, "곧 오는 버스가 없어요", ["<div class='h2'>아래에서 다음 버스와 다른 방법을 확인하세요.</div>"])
     elif not risky:
@@ -1155,9 +1183,7 @@ def _live_section(routes, demo, dq, direction):
     if in_service and first is not None and rec is not None and alts is not None:
         sit_line(rec, alts[0], pred)
     together_note(cards)
-    if weekend:
-        html("<div class='n13-note'>주말은 평일(금요일) 데이터로 추정한 값이에요.</div>")
-    cn = "" if weekend or not in_service else crowd_note(P, day, now)   # 주말엔 수업이 없어 안 보임
+    cn ="" if weekend or not in_service else crowd_note(P, day, now)   # 주말엔 수업이 없어 안 보임
     if cn:
         html(f"<div class='n13-note'><span class='n13-crowd'>몰림 주의</span> {cn}</div>")
 
@@ -1200,7 +1226,7 @@ def _live_section(routes, demo, dq, direction):
 def feedback_section(routes, demo, dq):
     P, S_all, _, _ = load_tables()
     now = get_now(demo, st.query_params)
-    day, kind, _ = day_info(now, dq)
+    day, kind, weekend = day_info(now, dq)
     S = S_all[S_all["일정"] == kind]
     ss = st.session_state
     ss["demo_mode"] = demo
@@ -1211,8 +1237,8 @@ def feedback_section(routes, demo, dq):
     if ss.get("fb_broken"):
         html("<div class='n13-mu'>피드백 저장이 잠시 안 돼요. 나중에 다시 시도해 주세요.</div>")
         return
-    if now.hour not in SERVICE_HOURS:
-        html("<div class='n13-mu'>피드백은 09~21시에 받아요.</div>")
+    if now.hour not in SERVICE_HOURS or weekend:
+        html("<div class='n13-mu'>피드백은 평일 09~21시에 받아요.</div>")
         return
     if demo:   # 예시: 시간표상 방금(40분 안) N13에 도착한 노선
         m = now.hour * 60 + now.minute
