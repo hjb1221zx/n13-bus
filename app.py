@@ -77,7 +77,7 @@ TAGO = [("25", "DJB8002923"),         # 대전광역시/계룡시 → 48번
         ("34020", "GOB186011031")]    # 공주시 → 300·340번
 CACHE_SEC = 45            # 화면 자동 갱신 간격
 API_TTL = 60              # 같은 정류장 도착정보 저장 시간(초)
-LIMIT = {"대전 도착정보": 10000, "TAGO 도착정보": 1000}   # TAGO 한도는 공식 값 미확인 → 1,000으로 보수적으로 가정
+LIMIT = {"대전 도착정보": 10000, "TAGO 도착정보": 10000}  # TAGO 하루 한도 10,000건(사용자가 공공데이터포털에서 확인, 11/22)
 LIVE_FAIL = "지금은 실시간 정보를 불러올 수 없어서 예정 시각으로 보여드려요"   # 화면에 '시간표'라는 말은 쓰지 않음
 
 
@@ -259,10 +259,10 @@ def arrivals(ars):
 
 
 def tago_arrivals():
-    """덕명네거리: TAGO 대전(48번)·공주(300·340번). 2분 저장(한도가 작아서)"""
+    """덕명네거리: TAGO 대전(48번)·공주(300·340번). 대전 정류장과 같이 60초 저장(한도 10,000 확인 후 120→60초, 11/22)"""
     rows, errs = [], []
     for city, node in TAGO:
-        r, e = budget().get("TAGO 도착정보", node, lambda c=city, n=node: _call_tago(c, n), ttl=120)
+        r, e = budget().get("TAGO 도착정보", node, lambda c=city, n=node: _call_tago(c, n), ttl=API_TTL)
         rows += r
         errs += [e] if e else []
     return rows, ("; ".join(errs) if len(errs) == len(TAGO) else "")
