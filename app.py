@@ -68,17 +68,18 @@ PLACES = [("정문", "41690", 6.8, ALL_ROUTES, 1, "N13보다 덜 찬 상태로 �
           ("덕명네거리", "41400", 11.5, [48, 107, 300, 340], None, "현충원역 방면 · 대전 48·107번, 공주 300·340번")]
 # 시간표 버스의 출발지와 출발지→정류장 이동 시간(분, 추정)
 ORIGIN = {11: "수통골", 102: "수통골", 104: "수통골", 113: "학하동", 117: "학하동", 212: "빼울약수터", 107: "동학사",
-          300: "공주 산성동", 340: "공주 신원사"}
+          300: "공주", 340: "공주"}   # 300 공주 산성동, 340 공주 신원사 출발
 T_DEP = {11: 4, 102: 4, 104: 4, 113: 12, 117: 12, 212: 66}
 T_DUK = {107: 27, 300: 65, 340: 90}   # 덕명네거리까지 (parse_timetable_alt.py, build_gongju_schedule.py)
 REALTIME_ONLY = {48}                  # 공식 시간표 없음 → 실시간(TAGO)에 잡힐 때만
 # TAGO(국토교통부) 정류소 ID: 덕명네거리 현충원역 방면 (TAGO 정류소정보 getSttnNoList로 찾음, 11/22)
 TAGO = [("25", "DJB8002923"),         # 대전광역시/계룡시 → 48번
         ("34020", "GOB186011031")]    # 공주시 → 300·340번
-CACHE_SEC = 45            # 화면 자동 갱신 간격
+CACHE_SEC = 60            # 화면 자동 갱신 간격 = API 저장 시간과 같게(11/22 11차, 45→60초)
 API_TTL = 60              # 같은 정류장 도착정보 저장 시간(초)
 LIMIT = {"대전 도착정보": 10000, "TAGO 도착정보": 10000}  # TAGO 하루 한도 10,000건(사용자가 공공데이터포털에서 확인, 11/22)
 LIVE_FAIL = "지금은 실시간 정보를 불러올 수 없어서 예정 시각으로 보여드려요"   # 화면에 '시간표'라는 말은 쓰지 않음
+PART_FAIL = "일부 정류장은 지금 실시간 정보를 불러올 수 없어서 예정 시각으로 보여드려요."
 
 
 # ---------------- 데이터 ----------------
@@ -496,6 +497,8 @@ CSS = """
 .n13-stamp{font-size:.82rem;color:#4b5563;margin:2px 0 6px}
 .n13-note{font-size:.82rem;color:#374151;background:#f4f5f7;border-radius:10px;padding:8px 12px;margin:8px 0 0}
 .n13-crowd{color:#b91c1c;font-weight:700}
+.n13-warn{font-size:.82rem;color:#b91c1c;font-weight:600;line-height:1.6;margin-top:2px}
+.n13-legend{font-size:.78rem;color:#4b5563;line-height:1.6;margin:-4px 0 4px}
 .n13-chip{display:inline-block;border-radius:6px;padding:1px 8px;font-weight:700;font-size:.85rem;white-space:nowrap;line-height:1.5}
 .n13-chip.sm{font-size:.75rem;padding:0 6px}
 .n13-ph{font-weight:600;font-size:.95rem;white-space:nowrap;margin-left:6px}
@@ -541,8 +544,17 @@ def board(level):
     return f"<span class='nw'>{chip(level)}<span class='n13-ph'>{SHORT[level]}</span></span>"
 
 
-LEGEND = ("탑승 쉬움 못 탈 확률 10% 미만 · 보통 10~20% · <span class='nw'>어려움 20~40%</span> · "
-          "<span class='nw'>매우 어려움 40% 이상 (추정)</span>")
+# 범례: 선택 토글 바로 아래(11/22 11차). 휴대폰에서 두 덩어리로만 줄바꿈
+LEGEND = ("<span class='nw'>못 탈 확률(추정) · 탑승 쉬움 10% 미만 · 보통 10~20% ·</span> "
+          "<span class='nw'>어려움 20~40% · 매우 어려움 40% 이상</span>")
+RED = "#b91c1c"
+
+
+def crowded_warn(lv, lvb):
+    """붐비는 날(상위 10%) 단계가 더 나쁠 때만 작은 빨간 글씨 한 줄 (11/22 11차 되살림)"""
+    if lv in BIDX and lvb in BIDX and BIDX[lvb] > BIDX[lv]:
+        return f"<div class='n13-warn'>붐비는 날엔 {DISP[lvb]}</div>"
+    return ""
 
 
 def when(m):
@@ -569,27 +581,47 @@ def eta_text(rt, e, kind, now, travel, tail="", short=False):
     return f"<span class='nw'>약 {e}분 뒤{end}{tail}</span>"
 
 
+def dep_text(rt, e, kind, now, travel, tail="", live_approx=True):
+    """다음 버스·덕명네거리 줄(11/22 11차, 예전 형식): 실시간 '약 8분 뒤 도착' /
+    아직 출발 전 '수통골에서 11:52 출발 예정 (약 26분 뒤)' / 출발 예정이 지났는데 실시간에 없으면 '약 N분 뒤 도착 (추정)'"""
+    if kind == "실시간" or travel is None:
+        s = f"약 {max(e, 1)}분 뒤 도착" if (live_approx or kind != "실시간") else when(e)
+        return f"<span class='nw'>{s}{tail}</span>"
+    dep = now + dt.timedelta(minutes=e - travel)
+    if dep <= now:
+        return f"<span class='nw'>약 {max(e, 1)}분 뒤 도착 (추정){tail}</span>"
+    if e > 90:   # 한참 뒤면 '(약 250분 뒤)' 대신 출발 시각만
+        return f"<span class='nw'>{ORIGIN[rt]}에서 {dep:%H:%M} 출발 예정{tail}</span>"
+    return f"<span class='nw'>{ORIGIN[rt]}에서 {dep:%H:%M} 출발 예정</span> <span class='nw'>(약 {e}분 뒤){tail}</span>"
+
+
 def next_line(rt, e, kind, lv, now, tr):
     c2 = f" {chip(lv, True)}" if lv else ""
-    return f"<div class='n13-mu n13-sub2'>다음 {eta_text(rt, e, kind, now, tr, c2, short=True)}</div>"
+    return f"<div class='n13-mu n13-sub2'>다음 · {dep_text(rt, e, kind, now, tr, c2)}</div>"
+
+
+def spare(L):
+    """승강장 도착 기준 열차까지 남은 분. 2분 이하면 숫자만 빨강"""
+    m = L["열차"] - (L["도착"] + L["걷기"])
+    n = f"<span style='color:{RED};font-weight:700'>{m}분</span>" if L["아슬"] else f"{m}분"
+    return f"환승 여유 {n}"
 
 
 def link_short(L):
-    """버스 카드용 열차 한 줄: '현충원역 11:42 반석행' / 여유 2분 이하면 '· 아슬아슬'"""
+    """버스 카드용 열차 한 줄: '현충원역 11:42 반석행 · 환승 여유 2분' (11/22 11차: '아슬아슬' 대신 숫자)"""
     if L["열차"] is None:
         return f"<span class='nw'>{L['역']} 약 {hm(L['도착'])} 도착</span>" + \
                (" <span class='nw'>· 오늘 남은 열차 없음</span>" if L["없음"] else "")
-    return f"<span class='nw'>{L['역']} {hm(L['열차'])} {L['종착']}행{' · 아슬아슬' if L['아슬'] else ''}</span>"
+    return f"<span class='nw'>{L['역']} {hm(L['열차'])} {L['종착']}행</span> <span class='nw'>· {spare(L)}</span>"
 
 
 def link_long(L):
-    """결론 카드용: '현충원역 11:38 도착 → 11:42 반석행 (승강장까지 약 2분)', 추정이면 '약 11:38'"""
+    """결론 카드용: '현충원역 약 11:38 도착 → 11:42 반석행 (승강장까지 약 2분) · 환승 여유 2분, 놓치면 다음 11:52'"""
     s = f"<span class='nw'>{L['역']} {'약 ' if L['추정'] else ''}{hm(L['도착'])} 도착</span>"
     if L["열차"] is None:
         return s + (" <span class='nw'>· 오늘 남은 열차 없음</span>" if L["없음"] else "")
     s += f" <span class='nw'>→ {hm(L['열차'])} {L['종착']}행</span> <span class='nw'>(승강장까지 약 {L['걷기']}분)</span>"
-    if L["아슬"]:
-        s += " <span class='nw'>· 아슬아슬해요" + (f", 놓치면 다음 {hm(L['다음'])}" if L["다음"] else "") + "</span>"
+    s += f" <span class='nw'>· {spare(L)}" + (f", 놓치면 다음 {hm(L['다음'])}" if L["아슬"] and L["다음"] else "") + "</span>"
     return s
 
 
@@ -601,7 +633,7 @@ def route_card(rt, cur, nxt, now, status="", link=None):
         return
     body = f"<div class='n13-main'>{num(rt)}{eta_text(rt, cur['도착분'], cur['종류'], now, tr)}</div>"
     if cur["예측"]:
-        body += f"<div class='n13-sub2'>{board(cur['보통_탑승'])}</div>"
+        body += f"<div class='n13-sub2'>{board(cur['보통_탑승'])}</div>" + crowded_warn(cur["보통_탑승"], cur["붐빔_탑승"])
     else:
         body += "<div class='n13-mu'>지원 시간(09~21시) 밖이라 예측하지 않아요</div>"
     if link:
@@ -743,7 +775,7 @@ def place_options(routes, demo, S, A, now, day, P, ratio, last_pass, in_service,
                 rows = rows + [r for r in t_rows if r["노선"] not in {x["노선"] for x in rows}]
                 err = err and t_err
         failed |= bool(err)
-        best, no_info, later = None, [], []
+        best, no_info, later, lines = None, [], [], []
         for rt in rts:
             live = [r["도착분"] for r in rows if r["노선"] == rt and r["MSG_TP"] != "07"]
             if offset is not None:
@@ -754,9 +786,14 @@ def place_options(routes, demo, S, A, now, day, P, ratio, last_pass, in_service,
             ok = [(e, k) for e, k in cands if e > walk + BUFFER]
             if not ok:
                 no_info.append(rt)
+                if offset is None:   # 덕명네거리 카드는 노선마다 한 줄(11/22 11차)
+                    why1 = "실시간 정보 없음" if rt in REALTIME_ONLY else "오늘 남은 버스 없음"
+                    lines.append((10 ** 6, f"{num(rt)}<span class='n13-mu'>{why1}</span>"))
                 continue
             e, kind = ok[0]
             tr = travel_min(rt, offset)
+            if offset is None:   # 48·300·340번은 혼잡 예측이 없어 칩 없이 시간만
+                lines.append((e, num(rt) + dep_text(rt, e, kind, now, tr, live_approx=False)))
             if e > 90:
                 later.append((e, f"{rt}번 " + eta_text(rt, e, kind, now, tr)))
                 continue
@@ -767,17 +804,20 @@ def place_options(routes, demo, S, A, now, day, P, ratio, last_pass, in_service,
             if best is None or rank_key(cand) < rank_key(best):
                 best = cand
         if best:
-            opts.append(best)
-            continue
-        miss_rt = [r for r in no_info if r in REALTIME_ONLY]
-        miss_sc = [r for r in no_info if r not in REALTIME_ONLY]
-        why = ([f"{'·'.join(map(str, miss_rt))}번은 지금 실시간에 안 잡혀요"] if miss_rt else []) + \
-              ([f"{'·'.join(map(str, miss_sc))}번은 오늘 남은 버스 없음"] if miss_sc else [])
-        if later:
-            later.sort()
-            opts.append({**base, "상태": "90분 안에 탈 수 있는 버스 없음 · 다음 " + later[0][1]})
+            o = best
         else:
-            opts.append({**base, "상태": " · ".join(why) or "오늘 남은 버스 없음"})
+            miss_rt = [r for r in no_info if r in REALTIME_ONLY]
+            miss_sc = [r for r in no_info if r not in REALTIME_ONLY]
+            why = ([f"{'·'.join(map(str, miss_rt))}번은 지금 실시간에 안 잡혀요"] if miss_rt else []) + \
+                  ([f"{'·'.join(map(str, miss_sc))}번은 오늘 남은 버스 없음"] if miss_sc else [])
+            if later:
+                later.sort()
+                o = {**base, "상태": "90분 안에 탈 수 있는 버스 없음 · 다음 " + later[0][1]}
+            else:
+                o = {**base, "상태": " · ".join(why) or "오늘 남은 버스 없음"}
+        if offset is None:
+            o["노선줄"] = [s for _, s in sorted(lines, key=lambda x: x[0])]
+        opts.append(o)
     return opts, failed
 
 
@@ -794,7 +834,9 @@ def option_card(o, now):
         head = "<span class='n13-place'>N13</span> <span class='n13-mu'>· 지금 있는 곳</span>"
     else:
         head = f"<span class='n13-place'>{o['장소']}</span> <span class='n13-mu'>· 걸어서 약 {round(o['걷기'])}분</span>"
-    if o.get("버스") is None:
+    if o.get("노선줄"):   # 덕명네거리: 노선(107·48·300·340)마다 한 줄
+        body = "".join(f"<div class='n13-pl2'>{s}</div>" for s in o["노선줄"])
+    elif o.get("버스") is None:
         body = f"<div class='n13-mu n13-sub2'>{o['상태']}</div>"
     else:
         rt = o["버스"]
@@ -847,11 +889,8 @@ def hero_card(lv, h1, lines):
 
 
 def hero_detail(rt, e, kind, now, tr, lv, lvb, link):
-    out = [f"<div class='h2'>{eta_text(rt, e, kind, now, tr)} · {board(lv)}</div>"]
-    small = f"못 탈 확률 {PROB[lv]} (추정)"
-    if lvb and BIDX[lvb] > BIDX[lv]:
-        small += f" · 붐비는 날엔 {chip(lvb, True)}"
-    out.append(f"<div class='n13-mu'>{small}</div>")
+    out = [f"<div class='h2'>{eta_text(rt, e, kind, now, tr)} · {board(lv)}</div>", crowded_warn(lv, lvb),
+           f"<div class='n13-mu'>못 탈 확률 {PROB[lv]} (추정)</div>"]
     if link:
         out.append(f"<div class='n13-mu'>{link_long(link)}</div>")
     return out
@@ -880,7 +919,7 @@ def _live_section(routes, demo, dq, direction):
     stamp = kst_now()
     # 화면 글자는 예시 화면이면 예시 시각, 갱신 지킴이는 data 속성(실제 시각)을 봄
     shown = f"{now:%H:%M} 기준 · 예시 화면" if demo else f"{stamp:%H:%M:%S} 기준"
-    html(f"<div class='n13-stamp' data-n13-stamp='{stamp:%H%M%S}'>{shown} · 45초마다 자동 갱신</div>")
+    html(f"<div class='n13-stamp' data-n13-stamp='{stamp:%H%M%S}'>{shown} · 1분마다 자동 갱신</div>")
 
     err, last_pass = "", {}
     if demo:
@@ -1008,7 +1047,7 @@ def _live_section(routes, demo, dq, direction):
     if alts is not None:
         ranked, rest, slow, failed = alts
         if failed:
-            html(f"<div class='n13-note'>다른 정류장은 {LIVE_FAIL}.</div>")
+            html(f"<div class='n13-note'>{PART_FAIL}</div>")
         show = ranked[:2] + [TAXI] if slow else ranked[:3]
         more = ranked[(2 if slow else 3):] + rest + ([] if slow else [TAXI])
         for o in show:
@@ -1023,7 +1062,7 @@ def _live_section(routes, demo, dq, direction):
                 ranked, rest, slow, failed = all_alternatives(routes, demo, S, A, now, day, P, ratio, last_pass,
                                                               in_service, T, subway, first)
                 if failed:
-                    html(f"<div class='n13-note'>다른 정류장은 {LIVE_FAIL}.</div>")
+                    html(f"<div class='n13-note'>{PART_FAIL}</div>")
                 for o in ranked + rest + [TAXI]:
                     option_card(o, now)
 
@@ -1074,14 +1113,15 @@ def feedback_section(routes, demo, dq):
 
 
 def footer():
-    html(f"<div class='n13-mu' style='text-align:center;margin-top:24px'>{LEGEND}<br>"
+    html("<div class='n13-mu' style='text-align:center;margin-top:24px'>"
          "예측은 추정값이에요 · 다른 목적지는 길찾기 앱을 이용하세요<br>"
          "출처: 공공데이터포털 대전 버스 도착정보·노선정보, 국토교통부 TAGO 버스도착정보, 대전교통공사 열차시각표·역간 소요시간, "
          "대전교통 빅데이터 플랫폼 교통카드, 대전교통정보센터·공주시 버스 운행 시각, 타슈 위치 현황, OpenStreetMap</div>")
 
 
 # 자동 갱신 지킴이: 휴대폰 화면을 껐다 켜거나 다른 앱에 다녀오면 연결이 끊겨 갱신이 멈출 수 있음 →
-#  (1) 화면이 1분 넘게 가려졌다가 다시 보이면 새로고침 (2) '기준' 시각 글자가 150초 넘게 안 바뀌면 새로고침
+#  (1) 화면이 90초(갱신 1.5번) 넘게 가려졌다가 다시 보이면 새로고침
+#  (2) '기준' 시각이 200초(갱신 3번 넘게) 안 바뀌면 새로고침  — 11/22 11차: 갱신 60초에 맞춰 60·150초 → 90·200초
 #  사용자의 선택(방향·노선 등)은 주소(쿼리)에 저장해 두어 새로고침해도 그대로
 KEEPALIVE = """
 <script>
@@ -1094,7 +1134,7 @@ KEEPALIVE = """
   }
   P.document.addEventListener('visibilitychange', function(){
     if (P.document.hidden) { hiddenAt = Date.now(); }
-    else if (hiddenAt && Date.now() - hiddenAt > 60000) { reload('hidden ' + Math.round((Date.now() - hiddenAt) / 1000) + 's'); }
+    else if (hiddenAt && Date.now() - hiddenAt > 90000) { reload('hidden ' + Math.round((Date.now() - hiddenAt) / 1000) + 's'); }
     else { changed = Date.now(); }
   });
   setInterval(function(){
@@ -1102,7 +1142,7 @@ KEEPALIVE = """
     if (!el || P.document.hidden) { changed = Date.now(); return; }
     const t = el.getAttribute('data-n13-stamp');
     if (t !== last) { last = t; changed = Date.now(); }
-    else if (Date.now() - changed > 150000) { reload('stale'); }
+    else if (Date.now() - changed > 200000) { reload('stale'); }
   }, 10000);
 })();
 </script>
@@ -1159,6 +1199,7 @@ def main():
             html("<div class='n13-mu'>노선을 하나 이상 골라 주세요.</div>")
             footer()
             return
+    html(f"<div class='n13-legend'>{LEGEND}</div>")   # 범례: 선택 토글 바로 아래(11/22 11차)
     live_section(routes, demo, dq, direction)
     feedback_section(routes, demo, dq)
     footer()
