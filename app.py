@@ -874,7 +874,7 @@ def option_card(o, now):
     else:
         head = f"<span class='n13-place'>{o['장소']}</span> <span class='n13-mu'>· 걸어서 약 {round(o['걷기'])}분</span>"
     if o.get("노선줄"):   # 덕명네거리: 노선(107·48·300·340)마다 한 줄
-        body = "".join(f"<div class='n13-pl2'>{s}</div>" for s in o["노선줄"])
+        body = "".join(f"<div class='n13-pl2' style='font-weight:400'>{s}</div>" for s in o["노선줄"])  # 11/23: 굵게 풀기(다른 카드와 같게)
     elif o.get("버스") is None:
         body = f"<div class='n13-mu n13-sub2'>{o['상태']}</div>"
     else:
@@ -1334,15 +1334,15 @@ def _qp_set(name, value):
 
 
 def main():
-    st.set_page_config(page_title="한밭대학교 N13 하교 버스", layout="centered")
+    st.set_page_config(page_title="N13 하교 버스 탑승 가능성 예측", layout="centered")
     html(CSS)
     components.html(KEEPALIVE, height=0)
     qp = st.query_params
     demo = "demo" in qp
     dq = qp.get("day") if demo and qp.get("day") in list(DAYS) else None
     now = get_now(demo, qp)
-    html("<div class='n13-title'>한밭대학교 N13 하교 버스</div>"
-         f"<div class='n13-sub'>삼성화재연수원 정류장 · {now:%H:%M} {dq or DAYS[now.weekday()]}요일 기준</div>")
+    # 11/23: 부제(한밭대학교 N13 · 시각 기준) 삭제 — 기준 시각은 범례 아래 줄에 이미 있음
+    html("<div class='n13-title' style='margin-bottom:14px'>삼성화재연수원 정류장<br>하교 버스 탑승 가능성 예측</div>")
     ss = st.session_state
     pre = [int(x) for x in str(qp.get("routes", "")).split(",") if x.strip().isdigit() and int(x) in ALL_ROUTES]
     # 처음 열 때만 주소의 값으로 선택을 채움(새로고침해도 유지)
